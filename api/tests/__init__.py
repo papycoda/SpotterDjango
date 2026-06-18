@@ -1,0 +1,1 @@
+"""FuelSpotter API test suite."""

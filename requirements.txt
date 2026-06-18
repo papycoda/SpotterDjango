@@ -1,0 +1,15 @@
+# Django
+django==6.0.6
+djangorestframework==3.17.1
+django-cors-headers==4.9.0
+
+# API Documentation
+drf-yasg==1.21.10
+pyyaml==6.0.3
+
+# Celery for async tasks
+celery==5.6.3
+redis==8.0.0
+
+# Environment variables
+python-dotenv==1.2.2
