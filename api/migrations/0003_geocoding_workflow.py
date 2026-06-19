@@ -2,6 +2,10 @@ import django.db.models.deletion
 from django.db import migrations, models
 
 
+def create_rate_limit_state(apps, schema_editor):
+    apps.get_model('api', 'GeocodingRateLimit').objects.create(id=1)
+
+
 class Migration(migrations.Migration):
     dependencies = [
         ('api', '0002_fuelstation_rack_id'),
@@ -22,6 +26,10 @@ class Migration(migrations.Migration):
                 ),
                 ('next_allowed_at', models.DateTimeField(blank=True, null=True)),
             ],
+        ),
+        migrations.RunPython(
+            create_rate_limit_state,
+            reverse_code=migrations.RunPython.noop,
         ),
         migrations.AddField(
             model_name='fuelstation',
