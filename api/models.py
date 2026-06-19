@@ -5,6 +5,7 @@ class FuelStation(models.Model):
     """Model for fuel station data."""
     GEOCODING_STATUS_CHOICES = [
         ('pending', 'Pending'),
+        ('claimed', 'Claimed'),
         ('processing', 'Processing'),
         ('success', 'Success'),
         ('failed', 'Failed'),
@@ -24,6 +25,13 @@ class FuelStation(models.Model):
         max_length=20,
         choices=GEOCODING_STATUS_CHOICES,
         default='pending'
+    )
+    geocode_job = models.ForeignKey(
+        'GeocodeJob',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='stations',
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -86,8 +94,20 @@ class GeocodeJob(models.Model):
     failed_count = models.IntegerField(default=0)
     error_message = models.TextField(blank=True, null=True)
     retry_failed = models.BooleanField(default=False)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    worker_id = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"GeocodeJob {self.id} - {self.status}"
+
+
+class GeocodingRateLimit(models.Model):
+    """Singleton database state used to reserve Nominatim request slots."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    next_allowed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return "Nominatim rate limit"

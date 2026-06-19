@@ -67,7 +67,22 @@ class GeocodeJobSerializer(serializers.ModelSerializer):
     """Serializer for GeocodeJob model."""
     class Meta:
         model = GeocodeJob
-        fields = '__all__'
+        fields = (
+            'id',
+            'status',
+            'total_stations',
+            'processed_count',
+            'success_count',
+            'failed_count',
+            'retry_failed',
+            'created_at',
+            'completed_at',
+        )
+
+
+class GeocodeRequestSerializer(serializers.Serializer):
+    limit = serializers.IntegerField(min_value=1, max_value=2000, default=500)
+    retry_failed = serializers.BooleanField(default=False)
 
 
 # Request/Response serializers for API endpoints

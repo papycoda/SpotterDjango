@@ -20,6 +20,9 @@ class EnvironmentSettingsTests(SimpleTestCase):
             "CORS_ALLOW_ALL_ORIGINS",
             "CORS_ALLOWED_ORIGINS",
             "SUPPORTED_COUNTRY_CODES",
+            "NOMINATIM_TIMEOUT_SECONDS",
+            "GEOCODING_STALE_AFTER_SECONDS",
+            "GEOCODING_POLL_SECONDS",
         ):
             process_environment.pop(key, None)
         process_environment.update(environment)
@@ -78,6 +81,9 @@ class EnvironmentSettingsTests(SimpleTestCase):
                 "EXTERNAL_HTTP_TIMEOUT_SECONDS": "4.5",
                 "NOMINATIM_USER_AGENT": "FuelSpotterTests/1.0",
                 "NOMINATIM_MIN_INTERVAL_SECONDS": "1.25",
+                "NOMINATIM_TIMEOUT_SECONDS": "6.5",
+                "GEOCODING_STALE_AFTER_SECONDS": "90",
+                "GEOCODING_POLL_SECONDS": "2.5",
                 "SUPPORTED_COUNTRY_CODES": "US",
             },
             "{"
@@ -86,6 +92,9 @@ class EnvironmentSettingsTests(SimpleTestCase):
             "'timeout': settings.EXTERNAL_HTTP_TIMEOUT_SECONDS, "
             "'user_agent': settings.NOMINATIM_USER_AGENT, "
             "'interval': settings.NOMINATIM_MIN_INTERVAL_SECONDS, "
+            "'nominatim_timeout': settings.NOMINATIM_TIMEOUT_SECONDS, "
+            "'stale_after': settings.GEOCODING_STALE_AFTER_SECONDS, "
+            "'poll': settings.GEOCODING_POLL_SECONDS, "
             "'countries': settings.SUPPORTED_COUNTRY_CODES"
             "}",
         )
@@ -95,6 +104,9 @@ class EnvironmentSettingsTests(SimpleTestCase):
         self.assertEqual(values["timeout"], 4.5)
         self.assertEqual(values["user_agent"], "FuelSpotterTests/1.0")
         self.assertEqual(values["interval"], 1.25)
+        self.assertEqual(values["nominatim_timeout"], 6.5)
+        self.assertEqual(values["stale_after"], 90.0)
+        self.assertEqual(values["poll"], 2.5)
         self.assertEqual(values["countries"], ["us"])
 
     def test_assignment_vehicle_assumptions_are_fixed(self):
