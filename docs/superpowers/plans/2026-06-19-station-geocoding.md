@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a resumable, rate-limited Celery workflow that geocodes imported fuel stations ahead of route planning and exposes staff-only trigger and status APIs.
+**Goal:** Build a resumable, database-backed worker that geocodes imported fuel stations ahead of route planning and exposes staff-only trigger and status APIs.
 
-**Architecture:** Staff requests create a persisted job and atomically claim a bounded set of stations. A Celery worker transitions one station at a time from claimed to processing, calls Nominatim through a bounded client and Redis slot limiter, then persists success or failure; late acknowledgement, heartbeats, and periodic stale recovery make interrupted work resumable.
+**Architecture:** Staff requests create a persisted job and atomically claim a bounded set of stations. A Django management-command worker transitions one station at a time from claimed to processing, calls Nominatim through a bounded client and database slot limiter, then persists success or failure; ownership, heartbeats, and restart-time stale recovery make interrupted work resumable. Celery remains an optional thin adapter.
 
-**Tech Stack:** Python 3.14, Django 6, Django REST Framework, Celery 5.6, Redis 8, requests, SQLite/PostgreSQL-compatible ORM.
+**Tech Stack:** Python 3.14, Django 6, Django REST Framework, requests, SQLite development/PostgreSQL production-compatible ORM; optional Celery adapter.
 
 ---
 
@@ -14,12 +14,13 @@
 
 - Modify `api/models.py`: claimed station state, job assignment, and heartbeat.
 - Create `api/migrations/0003_geocoding_workflow.py`: additive schema migration.
-- Modify `fuelSpotter/settings.py` and `.env.example`: timeout, stale threshold, Redis limiter, queue, and Beat configuration.
+- Modify `fuelSpotter/settings.py` and `.env.example`: timeout, stale threshold, polling, and retry configuration.
 - Modify `api/serializers.py`: validated trigger request and explicit admin job response.
-- Create `api/clients/rate_limiter.py`: atomic Redis request-slot reservation.
+- Create `api/services/geocoding_rate_limiter.py`: atomic database request-slot reservation.
 - Replace `api/clients/nominatim_client.py`: bounded, typed Nominatim adapter.
 - Replace `api/services/geocoding_service.py`: job creation, station transitions, counters, and recovery.
-- Replace geocoding entry points in `api/tasks.py`: retryable work and stale-job recovery.
+- Create `api/management/commands/run_geocoding_worker.py`: default queue worker and stale recovery loop.
+- Replace the geocoding entry point in `api/tasks.py`: optional persisted-job Celery wrapper.
 - Modify `api/views.py`: staff-only trigger and aggregate status endpoints.
 - Modify `api/services/station_matching_service.py`: success-only local coordinate queryset.
 - Expand the layered `api/tests/` package with network-free coverage.
@@ -39,7 +40,7 @@
 
 - [ ] **Step 1: Write failing tests for the new schema, request constraints, and settings**
 
-Add tests asserting `claimed` is a valid `FuelStation.geocoding_status`, a station can reference a `GeocodeJob`, `GeocodeJob.heartbeat_at` is nullable, and `GeocodeRequestSerializer` defaults to `limit=500/retry_failed=False` while rejecting limits outside `1..2000`. Extend the environment subprocess test to assert `NOMINATIM_RATE_LIMIT_REDIS_URL`, `GEOCODING_STALE_AFTER_SECONDS`, and `NOMINATIM_TIMEOUT_SECONDS`.
+Add tests asserting `claimed` is a valid `FuelStation.geocoding_status`, a station can reference a `GeocodeJob`, `GeocodeJob.heartbeat_at` is nullable, the singleton rate-limit model stores `next_allowed_at`, and `GeocodeRequestSerializer` defaults to `limit=500/retry_failed=False` while rejecting limits outside `1..2000`. Extend the environment subprocess test to assert `GEOCODING_STALE_AFTER_SECONDS`, `GEOCODING_POLL_SECONDS`, and `NOMINATIM_TIMEOUT_SECONDS`.
 
 ```python
 serializer = GeocodeRequestSerializer(data={})
@@ -71,13 +72,13 @@ Use explicit fields on `GeocodeJobSerializer`. Add settings with validation that
 
 ```python
 NOMINATIM_TIMEOUT_SECONDS = float(os.environ.get('NOMINATIM_TIMEOUT_SECONDS', EXTERNAL_HTTP_TIMEOUT_SECONDS))
-NOMINATIM_RATE_LIMIT_REDIS_URL = os.environ.get('NOMINATIM_RATE_LIMIT_REDIS_URL', CELERY_BROKER_URL)
 GEOCODING_STALE_AFTER_SECONDS = float(os.environ.get('GEOCODING_STALE_AFTER_SECONDS', '120'))
+GEOCODING_POLL_SECONDS = float(os.environ.get('GEOCODING_POLL_SECONDS', '5'))
 if GEOCODING_STALE_AFTER_SECONDS <= NOMINATIM_TIMEOUT_SECONDS + NOMINATIM_MIN_INTERVAL_SECONDS:
     raise ImproperlyConfigured('GEOCODING_STALE_AFTER_SECONDS must exceed the Nominatim timeout and interval')
 ```
 
-Configure `api.tasks.geocode_stations_task` on queue `geocoding` and a one-minute Beat entry for stale recovery. Generate migration with `python manage.py makemigrations api` and inspect it rather than editing an applied migration.
+Add `GEOCODING_POLL_SECONDS` and bounded retry settings. Generate migration with `python manage.py makemigrations api` and inspect it rather than editing an applied migration.
 
 - [ ] **Step 4: Run tests and migration checks GREEN**
 
@@ -94,16 +95,16 @@ git add api/models.py api/migrations/0003_geocoding_workflow.py api/serializers.
 git commit -m "feat: add geocoding job lifecycle"
 ```
 
-### Task 2: Build the distributed limiter and Nominatim client
+### Task 2: Build the database limiter and Nominatim client
 
 **Files:**
-- Create: `api/clients/rate_limiter.py`
+- Create: `api/services/geocoding_rate_limiter.py`
 - Replace: `api/clients/nominatim_client.py`
 - Replace: `api/tests/test_clients.py`
 
 - [ ] **Step 1: Write failing client tests**
 
-Cover structured USA search parameters, configured URL/user agent/timeout, valid decimal coordinates, empty results, malformed payload, HTTP `429`, HTTP `5xx`, other status errors, request exceptions, and Redis limiter invocation. Use patched `requests.Session.get` and a fake limiter; no test performs network I/O.
+Cover structured USA search parameters, configured URL/user agent/timeout, valid decimal coordinates, empty results, malformed payload, HTTP `429`, HTTP `5xx`, other status errors, request exceptions, and database limiter invocation. Use patched `requests.Session.get` and a fake limiter; no test performs network I/O.
 
 ```python
 result = client.geocode(address="100 Main St", city="Dallas", state="TX")
@@ -116,7 +117,7 @@ session.get.assert_called_once_with(
 )
 ```
 
-Test the limiter's Lua result behavior with a fake Redis object: zero wait returns immediately; positive milliseconds call the injected sleeper and retry; Redis errors raise `RateLimiterUnavailable`.
+Test sequential database reservations with an injected clock and sleeper: the first reservation runs immediately, the second sleeps for the remaining interval, and the stored `next_allowed_at` advances atomically.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -128,7 +129,7 @@ Expected: failures because typed exceptions, coordinate result, limiter, and HTT
 
 Create `GeocodingResult`, `NominatimError`, `NominatimTransientError`, and `NominatimPermanentError`. Map network/429/5xx to transient; malformed/other statuses to permanent; return `None` for `[]`. Quantize coordinates to seven decimal places and enforce latitude `[-90,90]` and longitude `[-180,180]`.
 
-Create `RedisRateLimiter.acquire()` using `redis.Redis.from_url(...).eval(...)` with a Lua script that reads Redis `TIME`, atomically sets the next permitted millisecond timestamp with `PSETEX`, and returns required wait milliseconds. Inject `sleep` for tests. Never fall back to an unthrottled call.
+Create `DatabaseRateLimiter.acquire()` using `transaction.atomic()` and `select_for_update()` on the singleton `GeocodingRateLimit` row. Reserve `max(now, next_allowed_at)`, persist the following slot, commit, and sleep until the reserved time. Inject the clock and sleeper for deterministic tests.
 
 - [ ] **Step 4: Run tests and verify GREEN**
 
@@ -139,8 +140,8 @@ Expected: all client tests pass without network access.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add api/clients/nominatim_client.py api/clients/rate_limiter.py api/tests/test_clients.py
-git commit -m "feat: add rate-limited Nominatim client"
+git add api/clients/nominatim_client.py api/services/geocoding_rate_limiter.py api/tests/test_clients.py
+git commit -m "feat: add database-rate-limited Nominatim client"
 ```
 
 ### Task 3: Implement job claiming and station processing
@@ -192,24 +193,25 @@ git add api/services/geocoding_service.py api/tests/test_geocoding_service.py
 git commit -m "feat: process resumable geocoding jobs"
 ```
 
-### Task 4: Implement Celery execution and stale recovery
+### Task 4: Implement the database worker and optional Celery adapter
 
 **Files:**
 - Modify: `api/tasks.py`
+- Create: `api/management/commands/run_geocoding_worker.py`
+- Create: `api/tests/test_geocoding_worker.py`
 - Replace: `api/tests/test_tasks.py`
 
 - [ ] **Step 1: Write failing task tests**
 
-Cover job-ID-only arguments, successful completion, missing job as a safe no-op, transient `self.retry`, terminal failure cleanup, late-ack task options, stale recovery requeue, and fresh-job exclusion. Patch services and `.delay`; do not require Redis in unit tests.
+Cover oldest-job selection, `--once`, watch polling, transient bounded retry, terminal failure cleanup, stale recovery before polling, SQLite live-worker exclusion, and fresh-job exclusion. Separately test that the optional Celery wrapper accepts only a job ID and calls the same service; no Redis or Celery worker is required.
 
 ```python
+call_command("run_geocoding_worker", "--once")
+process.assert_called_once_with(job.id)
+
 with patch("api.tasks.GeocodingService.process_job") as process:
     geocode_stations_task.run(job.id)
 process.assert_called_once_with(job.id)
-
-recovered = recover_stale_geocode_jobs_task.run()
-self.assertEqual(recovered, 1)
-geocode_stations_task.delay.assert_called_once_with(job.id)
 ```
 
 - [ ] **Step 2: Run tests and verify RED**
@@ -220,19 +222,19 @@ Expected: failures from placeholder task behavior.
 
 - [ ] **Step 3: Implement bounded retry and recovery tasks**
 
-Define the bound task with `acks_late=True`, `reject_on_worker_lost=True`, `max_retries=5`, queue `geocoding`, and exponential countdown capped at 300 seconds. Retry only `NominatimTransientError` and `RateLimiterUnavailable`; terminal errors call `fail_job`. The recovery task computes `timezone.now() - timedelta(seconds=settings.GEOCODING_STALE_AFTER_SECONDS)`, calls `recover_stale_jobs`, and enqueues each recovered job ID.
+Implement the command loop with a unique worker token, stale recovery before each poll, oldest-pending-job selection, bounded exponential sleep for transient failures, `--once`, and `--watch`. On SQLite, reject a second live owner; PostgreSQL relies on row locks and conditional ownership. Keep `geocode_stations_task(job_id)` as a thin optional wrapper around `GeocodingService.process_job(job_id)` without endpoint dispatch or Redis-specific behavior.
 
 - [ ] **Step 4: Run tests and verify GREEN**
 
-Run: `python manage.py test api.tests.test_tasks -v 2`
+Run: `python manage.py test api.tests.test_geocoding_worker api.tests.test_tasks -v 2`
 
 Expected: all task tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add api/tasks.py api/tests/test_tasks.py
-git commit -m "feat: run and recover geocoding tasks"
+git add api/tasks.py api/management/commands/run_geocoding_worker.py api/tests/test_geocoding_worker.py api/tests/test_tasks.py
+git commit -m "feat: run database geocoding worker"
 ```
 
 ### Task 5: Expose staff trigger and status APIs
@@ -244,12 +246,12 @@ git commit -m "feat: run and recover geocoding tasks"
 
 - [ ] **Step 1: Write failing endpoint tests**
 
-Cover `202` creation and dispatch, `200` zero-work completion without dispatch, invalid input `400`, explicit retry flag, aggregate counts including claimed, latest serialized job, and existing anonymous/non-staff authorization behavior.
+Cover `202` job creation, `200` zero-work completion, invalid input `400`, explicit retry flag, aggregate counts including claimed, latest serialized job, and existing anonymous/non-staff authorization behavior. Assert the endpoint never calls Celery.
 
 ```python
 response = self.client.post(reverse("admin-geocode-stations"), {"limit": 25}, format="json")
 self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-geocode_stations_task.delay.assert_called_once_with(response.data["id"])
+self.assertEqual(response.data["status"], "pending")
 
 response = self.client.get(reverse("admin-geocode-status"))
 self.assertEqual(response.data["counts"]["claimed"], 1)
@@ -263,7 +265,7 @@ Expected: placeholder endpoint responses fail the contract.
 
 - [ ] **Step 3: Implement thin HTTP boundaries**
 
-Validate POST through `GeocodeRequestSerializer`, call `GeocodingService.create_job`, dispatch only non-empty jobs after transaction commit, and serialize with `GeocodeJobSerializer`. GET aggregates status counts with one grouped ORM query and returns the latest job or `null`. Keep `IsOperationsAdmin` on both endpoints and do not call clients from views.
+Validate POST through `GeocodeRequestSerializer`, call `GeocodingService.create_job`, and serialize with `GeocodeJobSerializer`; do not dispatch threads, Celery, or HTTP work from the request. GET aggregates status counts with one grouped ORM query and returns the latest job or `null`. Keep `IsOperationsAdmin` on both endpoints and do not call clients from views.
 
 - [ ] **Step 4: Run tests and verify GREEN**
 
@@ -330,7 +332,7 @@ git diff --check
 
 Expected: all tests pass, no Django issues, no migration drift, successful compilation, and no whitespace errors.
 
-If disposable Redis is available, run a Celery worker limited to the geocoding queue and Celery Beat, enqueue a one-station job against a mocked/local Nominatim endpoint, terminate the worker during processing, and verify redelivery or stale recovery. If Redis is unavailable, report this integration gate explicitly rather than implying it passed.
+Run the management-command worker against a mocked/local Nominatim endpoint for a one-station job, terminate it during processing, restart it after the stale threshold, and verify the same job resumes. This integration path must not require Redis or a Celery worker.
 
 - [ ] **Step 5: Commit**
 

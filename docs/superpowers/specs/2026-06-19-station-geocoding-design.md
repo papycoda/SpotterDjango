@@ -11,7 +11,7 @@ Geocode imported fuel stations asynchronously so route matching can use a local 
 - `limit`: optional integer, default `500`, minimum `1`, maximum `2000`.
 - `retry_failed`: optional boolean, default `false`.
 
-The endpoint requires an authenticated staff user, creates a persisted `GeocodeJob`, queues a Celery task with only the job ID, and returns `202 Accepted` with the serialized job. If no eligible stations exist, the job is created as completed with zero work and no task is queued.
+The endpoint requires an authenticated staff user, creates a persisted `GeocodeJob`, claims eligible stations, and returns `202 Accepted` with the serialized job. A separately running Django management-command worker processes queued jobs. If no eligible stations exist, the job is created as completed with zero work.
 
 `GET /api/v1/admin/fuel-stations/geocode/status/` requires an authenticated staff user and returns aggregate station counts (`total`, `success`, `pending`, `claimed`, `processing`, and `failed`) plus the latest geocoding job, if one exists.
 
@@ -31,25 +31,31 @@ The client returns coordinates for a valid match, returns `None` when Nominatim 
 - Explicit retry jobs select both `pending` and `failed` stations.
 - Stations already marked `claimed`, `processing`, or `success` are not selected by another job.
 
-Selection assigns stations to the job with status `claimed`; it does not mark the whole batch as processing. Immediately before an external call, the service atomically transitions one assigned station from `claimed` to `processing`. A valid result saves latitude and longitude and marks the station `success`. No match marks it `failed`. A transient client failure restores it to `claimed` and is re-raised so Celery can retry safely. A permanent client failure marks it `failed`.
+Selection assigns stations to the job with status `claimed`; it does not mark the whole batch as processing. Immediately before an external call, the service atomically transitions one assigned station from `claimed` to `processing`. A valid result saves latitude and longitude and marks the station `success`. No match marks it `failed`. A transient client failure restores it to `claimed` and is re-raised so the active executor can retry safely. A permanent client failure marks it `failed`.
 
 The service processes only the stations assigned to the persisted job and updates job counters after every station, making progress visible and restarts idempotent.
 
-### Celery task
+### Worker and optional Celery adapter
 
-`api/tasks.py` receives only a `GeocodeJob` ID. It atomically transitions a pending job to processing, invokes the service, and marks the job completed when all assigned work finishes. A duplicate delivery exits when the same job has a fresh processing heartbeat. The task uses late acknowledgement and rejects work on worker loss so Redis can redeliver interrupted jobs. Transient Nominatim failures use bounded Celery retry with backoff and jitter. An exhausted or unexpected failure marks the job failed with a sanitized error and marks its remaining claimed stations failed so none are stranded.
+`python manage.py run_geocoding_worker` is the default executor. It repeatedly claims the oldest pending job, invokes the service, applies bounded exponential retry delays for transient failures, and exits cleanly with `--once` or continues polling with `--watch`. A duplicate worker exits a job attempt when the same job has a fresh processing heartbeat. An exhausted or unexpected failure marks the job failed with a sanitized error and marks its remaining claimed stations failed so none are stranded.
 
-Rate limiting is enforced immediately before each Nominatim request using `NOMINATIM_MIN_INTERVAL_SECONDS` and a Redis-backed distributed limiter at `NOMINATIM_RATE_LIMIT_REDIS_URL`, which defaults to the Celery broker URL. An atomic Redis script reserves the next request slot using Redis server time; callers wait and retry until they own a slot. A short key expiry prevents abandoned limiter state from persisting. If Redis is unavailable, the task retries rather than making an unthrottled request. Geocoding tasks also use a dedicated Celery queue with worker concurrency `1` as defense in depth, but correctness does not depend on only one process being deployed.
+`api/tasks.py` remains a thin optional Celery adapter that accepts only a persisted job ID and calls the same service. The API does not require or dispatch Celery, so Redis and a Celery worker are not runtime prerequisites. A future deployment can enable the adapter without changing job or station semantics.
+
+### Database-backed rate limiting
+
+Rate limiting is enforced immediately before each Nominatim request using `NOMINATIM_MIN_INTERVAL_SECONDS` and a singleton database row. Inside `transaction.atomic()`, the limiter locks the row, reserves `max(now, next_allowed_at)`, advances `next_allowed_at` by the configured interval, commits, and then sleeps until its reserved slot. A crashed worker may waste one slot but cannot allow calls to run early.
+
+PostgreSQL row locking supports multiple worker processes safely. SQLite development runs one management-command worker; the command refuses a second live worker through the same heartbeat/ownership mechanism. This avoids pretending SQLite offers production-grade concurrent queue semantics.
 
 ### Stale-work recovery
 
-`GeocodeJob` stores a heartbeat timestamp, refreshed before and after each station call. `GEOCODING_STALE_AFTER_SECONDS` must be longer than the HTTP timeout plus maximum rate-limit wait. A Celery Beat recovery task finds processing jobs whose heartbeat is older than that threshold, locks each job, resets its assigned `processing` station to `claimed`, changes the job back to `pending`, and requeues the same job ID. Claimed stations therefore remain attached to their original job rather than being stranded or claimed by a competing job.
+`GeocodeJob` stores a heartbeat timestamp, refreshed before and after each station call. `GEOCODING_STALE_AFTER_SECONDS` must be longer than the HTTP timeout plus maximum rate-limit wait. At startup and before each polling cycle, the management-command worker finds processing jobs whose heartbeat is older than that threshold, locks each job, resets its assigned `processing` station to `claimed`, and changes the job back to `pending`. Claimed stations remain attached to their original job rather than being stranded or claimed by a competing job.
 
 Normal task redelivery is also idempotent: when a task starts for a pending or stale job, it resets any processing station assigned to that job back to `claimed`, derives counters from persisted station outcomes, and continues. A currently healthy job is never reset because its heartbeat is still fresh.
 
 ## Persisted job scope
 
-The existing `GeocodeJob` model tracks totals and outcomes. Its schema gains `heartbeat_at`. `FuelStation` gains the `claimed` geocoding status and a nullable relationship to its assigned geocoding job. A later explicit retry may reassign a failed station to a new job. This avoids passing thousands of station IDs through Celery and prevents concurrent jobs from processing the same rows. The schema changes are delivered in a new migration.
+The existing `GeocodeJob` model tracks totals and outcomes. Its schema gains `heartbeat_at` and worker ownership fields. `FuelStation` gains the `claimed` geocoding status and a nullable relationship to its assigned geocoding job. A singleton `GeocodingRateLimit` model stores the next reservable request time. A later explicit retry may reassign a failed station to a new job. The schema changes are delivered in a new migration.
 
 When a job is created, eligible stations are claimed inside `transaction.atomic()` up to the validated limit. PostgreSQL uses row locking where available; SQLite retains deterministic, transaction-scoped behavior for development.
 
@@ -68,6 +74,6 @@ Station corridor matching must filter for `geocoding_status="success"`, non-null
 
 ## Tests and verification
 
-Tests mock all external HTTP, Redis, and Celery dispatch. Coverage includes request validation, permissions, empty batches, claimed-to-processing transitions, deterministic selection, success, no result, permanent failure, transient retry, idempotent task redelivery, stale heartbeat recovery, failed-station retry selection, aggregate status, distributed rate limiting, and route matching's success-only coordinate filter.
+Tests mock all external HTTP and sleeping. Coverage includes request validation, permissions, empty batches, claimed-to-processing transitions, deterministic selection, success, no result, permanent failure, transient retry, idempotent worker restart, stale heartbeat recovery, single-worker ownership on SQLite, failed-station retry selection, aggregate status, database rate-slot reservation, the optional Celery wrapper, and route matching's success-only coordinate filter.
 
-Repository verification runs Django tests, system checks, migration drift checks, and a Celery worker against disposable Redis when available. Automated tests require no network access.
+Repository verification runs Django tests, system checks, migration drift checks, and the management-command worker against a mocked/local Nominatim endpoint. Automated tests require no network, Redis, or Celery worker.
