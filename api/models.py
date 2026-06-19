@@ -12,6 +12,7 @@ class FuelStation(models.Model):
 
     id = models.CharField(primary_key=True, max_length=50)
     opis_truckstop_id = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    rack_id = models.CharField(max_length=20, blank=True)
     name = models.CharField(max_length=255)
     address = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
