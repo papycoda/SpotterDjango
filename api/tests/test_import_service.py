@@ -1,5 +1,7 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from io import StringIO
+from unittest.mock import patch
 
 from django.test import TestCase
 
@@ -13,6 +15,19 @@ HEADERS = (
 
 
 class ImportServiceParsingTests(TestCase):
+    def test_name_selection_is_deterministic_when_only_case_differs(self):
+        self.assertTrue(hasattr(ImportService, "_select_name"))
+
+        selected = ImportService._select_name({
+            "HUCKS TRAVEL CENTER #51 dba FLYING J #889",
+            "HUCKS TRAVEL CENTER #51 DBA FLYING J #889",
+        })
+
+        self.assertEqual(
+            selected,
+            "HUCKS TRAVEL CENTER #51 DBA FLYING J #889",
+        )
+
     def test_canonicalizes_duplicate_station_rows(self):
         source = StringIO(
             HEADERS
@@ -66,6 +81,27 @@ class ImportServiceParsingTests(TestCase):
 
 
 class ImportServiceDatabaseTests(TestCase):
+    def test_identical_reimport_does_not_change_updated_at(self):
+        source_data = (
+            HEADERS
+            + "7,WOODED STOP,US-69,Big Cabin,OK,307,3.45\n"
+        )
+        first_import_time = datetime(2026, 6, 19, 10, 0, tzinfo=timezone.utc)
+        second_import_time = datetime(2026, 6, 19, 11, 0, tzinfo=timezone.utc)
+
+        with patch("django.utils.timezone.now", return_value=first_import_time):
+            ImportService.bulk_import(ImportService.parse_csv(StringIO(source_data)))
+        station = FuelStation.objects.get(pk="7")
+
+        with patch("django.utils.timezone.now", return_value=second_import_time):
+            result = ImportService.bulk_import(
+                ImportService.parse_csv(StringIO(source_data))
+            )
+        station.refresh_from_db()
+
+        self.assertEqual(result.updated, 0)
+        self.assertEqual(station.updated_at, first_import_time)
+
     def test_bulk_import_is_idempotent_and_preserves_coordinates(self):
         source = StringIO(
             HEADERS

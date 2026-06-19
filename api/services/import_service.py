@@ -119,10 +119,7 @@ class ImportService:
 
         stations = []
         for opis_id, group in groups.items():
-            name = max(
-                group["names"],
-                key=lambda candidate: (len(candidate), candidate.casefold()),
-            )
+            name = ImportService._select_name(group["names"])
             median_price = ImportService._median(group["prices"]).quantize(
                 CENT,
                 rounding=ROUND_HALF_UP,
@@ -147,27 +144,50 @@ class ImportService:
         )
 
     @staticmethod
+    def _select_name(names):
+        """Choose the longest name with deterministic case-sensitive tie-breaking."""
+        return sorted(
+            names,
+            key=lambda candidate: (-len(candidate), candidate.casefold(), candidate),
+        )[0]
+
+    @staticmethod
     @transaction.atomic
     def bulk_import(data):
         created_count = 0
         updated_count = 0
 
         for station in data.stations:
-            _, created = FuelStation.objects.update_or_create(
-                id=station.opis_truckstop_id,
-                defaults={
-                    "opis_truckstop_id": station.opis_truckstop_id,
-                    "rack_id": station.rack_id,
-                    "name": station.name,
-                    "address": station.address,
-                    "city": station.city,
-                    "state": station.state,
-                    "price_per_gallon": station.price_per_gallon,
-                },
-            )
-            if created:
+            imported_values = {
+                "opis_truckstop_id": station.opis_truckstop_id,
+                "rack_id": station.rack_id,
+                "name": station.name,
+                "address": station.address,
+                "city": station.city,
+                "state": station.state,
+                "price_per_gallon": station.price_per_gallon,
+            }
+            try:
+                stored_station = FuelStation.objects.get(
+                    id=station.opis_truckstop_id
+                )
+            except FuelStation.DoesNotExist:
+                FuelStation.objects.create(
+                    id=station.opis_truckstop_id,
+                    **imported_values,
+                )
                 created_count += 1
-            else:
+                continue
+
+            changed_fields = [
+                field_name
+                for field_name, value in imported_values.items()
+                if getattr(stored_station, field_name) != value
+            ]
+            if changed_fields:
+                for field_name in changed_fields:
+                    setattr(stored_station, field_name, imported_values[field_name])
+                stored_station.save(update_fields=[*changed_fields, "updated_at"])
                 updated_count += 1
 
         return ImportResult(

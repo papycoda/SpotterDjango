@@ -1,12 +1,14 @@
-from django.http import JsonResponse
+from django.core.paginator import Paginator
 from rest_framework import status
 from rest_framework.decorators import api_view
+from rest_framework.decorators import authentication_classes
 from rest_framework.decorators import permission_classes
 from rest_framework.response import Response
 from .models import FuelStation, ImportJob, GeocodeJob
 from .permissions import IsOperationsAdmin
 from .serializers import (
-    FuelStationSerializer, ImportJobSerializer, GeocodeJobSerializer,
+    FuelStationSerializer, FuelStationQuerySerializer,
+    ImportJobSerializer, GeocodeJobSerializer,
     RoutePreviewRequestSerializer, RoutePreviewResponseSerializer,
     FuelPlanRequestSerializer, FuelPlanResponseSerializer,
     FuelStationsNearRouteRequestSerializer,
@@ -61,23 +63,39 @@ def route_fuel_plan(request):
 
 # Fuel station endpoints
 @api_view(['GET'])
+@authentication_classes([])
 def fuel_stations_list(request):
     """
-    List fuel stations with optional filters.
+    List public fuel-station data with optional filters and bounded pagination.
 
     Query params: state, min_price, max_price, page, page_size
 
-    TODO: Implement filtering logic using StationMatchingService.
     """
-    state = request.query_params.get('state')
-    min_price = request.query_params.get('min_price')
-    max_price = request.query_params.get('max_price')
-    page = int(request.query_params.get('page', 1))
-    page_size = int(request.query_params.get('page_size', 50))
+    query_serializer = FuelStationQuerySerializer(data=request.query_params)
+    if not query_serializer.is_valid():
+        return Response(query_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    filters = query_serializer.validated_data
+    state = filters.get('state')
+    min_price = filters.get('min_price')
+    max_price = filters.get('max_price')
+    page = filters['page']
+    page_size = filters['page_size']
+
+    stations = FuelStation.objects.all()
+    if state:
+        stations = stations.filter(state__iexact=state)
+    if min_price is not None:
+        stations = stations.filter(price_per_gallon__gte=min_price)
+    if max_price is not None:
+        stations = stations.filter(price_per_gallon__lte=max_price)
+    stations = stations.order_by('id')
+    page_obj = Paginator(stations, page_size).get_page(page)
+    station_serializer = FuelStationSerializer(page_obj.object_list, many=True)
 
     return Response({
-        'count': 0,
-        'results': []
+        'count': page_obj.paginator.count,
+        'results': station_serializer.data
     })
 
 

@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from .models import FuelStation, ImportJob, GeocodeJob
 
@@ -6,7 +8,52 @@ class FuelStationSerializer(serializers.ModelSerializer):
     """Serializer for FuelStation model."""
     class Meta:
         model = FuelStation
-        fields = '__all__'
+        fields = (
+            'id',
+            'opis_truckstop_id',
+            'rack_id',
+            'name',
+            'address',
+            'city',
+            'state',
+            'price_per_gallon',
+            'latitude',
+            'longitude',
+        )
+
+
+class FuelStationQuerySerializer(serializers.Serializer):
+    state = serializers.RegexField(
+        r'^[A-Za-z]{2}$',
+        required=False,
+        trim_whitespace=True,
+    )
+    min_price = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        min_value=Decimal('0'),
+        required=False,
+    )
+    max_price = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        min_value=Decimal('0'),
+        required=False,
+    )
+    page = serializers.IntegerField(min_value=1, default=1)
+    page_size = serializers.IntegerField(min_value=1, max_value=200, default=50)
+
+    def validate_state(self, value):
+        return value.upper()
+
+    def validate(self, attrs):
+        min_price = attrs.get('min_price')
+        max_price = attrs.get('max_price')
+        if min_price is not None and max_price is not None and min_price > max_price:
+            raise serializers.ValidationError({
+                'max_price': 'Must be greater than or equal to min_price.'
+            })
+        return attrs
 
 
 class ImportJobSerializer(serializers.ModelSerializer):
