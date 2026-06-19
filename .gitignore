@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+TODO.md
+plan.md
+AGENTS.md

@@ -109,6 +109,12 @@ class GeocodingServiceTests(TestCase):
         self.assertEqual(job.processed_count, 1)
         self.assertEqual(job.success_count, 1)
         self.assertEqual(job.failed_count, 0)
+        client.geocode.assert_called_once_with(
+            name=station.name,
+            address=station.address,
+            city=station.city,
+            state=station.state,
+        )
 
     def test_no_match_and_permanent_error_fail_only_the_station(self):
         self.create_station("1")

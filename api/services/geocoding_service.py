@@ -122,6 +122,7 @@ class GeocodingService:
 
             try:
                 result = client.geocode(
+                    name=station.name,
                     address=station.address,
                     city=station.city,
                     state=station.state,
