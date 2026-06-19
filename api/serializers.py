@@ -85,6 +85,20 @@ class GeocodeRequestSerializer(serializers.Serializer):
     retry_failed = serializers.BooleanField(default=False)
 
 
+class GeocodeCountsSerializer(serializers.Serializer):
+    total = serializers.IntegerField(min_value=0)
+    pending = serializers.IntegerField(min_value=0)
+    claimed = serializers.IntegerField(min_value=0)
+    processing = serializers.IntegerField(min_value=0)
+    success = serializers.IntegerField(min_value=0)
+    failed = serializers.IntegerField(min_value=0)
+
+
+class GeocodeStatusResponseSerializer(serializers.Serializer):
+    counts = GeocodeCountsSerializer()
+    latest_job = GeocodeJobSerializer(allow_null=True)
+
+
 # Request/Response serializers for API endpoints
 
 class RoutePreviewRequestSerializer(serializers.Serializer):

@@ -1,4 +1,7 @@
 from django.core.paginator import Paginator
+from django.db.models import Count
+from drf_yasg import openapi
+from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.decorators import authentication_classes
@@ -8,13 +11,15 @@ from .models import FuelStation, ImportJob, GeocodeJob
 from .permissions import IsOperationsAdmin
 from .serializers import (
     FuelStationSerializer, FuelStationQuerySerializer,
-    ImportJobSerializer, GeocodeJobSerializer,
+    ImportJobSerializer, GeocodeJobSerializer, GeocodeRequestSerializer,
+    GeocodeStatusResponseSerializer,
     RoutePreviewRequestSerializer, RoutePreviewResponseSerializer,
     FuelPlanRequestSerializer, FuelPlanResponseSerializer,
     FuelStationsNearRouteRequestSerializer,
     LocationValidateRequestSerializer, LocationValidateResponseSerializer,
     FuelEstimateRequestSerializer, FuelEstimateResponseSerializer
 )
+from .services.geocoding_service import GeocodingService
 
 
 # Health check
@@ -165,33 +170,62 @@ def admin_import_status(request, import_id):
     })
 
 
+@swagger_auto_schema(
+    method='post',
+    request_body=GeocodeRequestSerializer,
+    responses={
+        200: GeocodeJobSerializer,
+        202: GeocodeJobSerializer,
+        400: openapi.Response('Invalid geocoding request'),
+    },
+)
 @api_view(['POST'])
 @permission_classes([IsOperationsAdmin])
 def admin_geocode_stations(request):
-    """
-    Trigger geocoding for stations without coordinates.
+    """Claim a bounded geocoding job for the database worker."""
+    request_serializer = GeocodeRequestSerializer(data=request.data)
+    if not request_serializer.is_valid():
+        return Response(
+            request_serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    job = GeocodingService.create_job(**request_serializer.validated_data)
+    response_status = (
+        status.HTTP_202_ACCEPTED
+        if job.total_stations
+        else status.HTTP_200_OK
+    )
+    return Response(GeocodeJobSerializer(job).data, status=response_status)
 
-    TODO: Implement geocoding task triggering.
-    """
-    return Response({
-        'queued': 0,
-        'message': 'TODO: Implement geocoding trigger'
-    })
 
-
+@swagger_auto_schema(
+    method='get',
+    responses={200: GeocodeStatusResponseSerializer},
+)
 @api_view(['GET'])
 @permission_classes([IsOperationsAdmin])
 def admin_geocode_status(request):
-    """
-    Check overall geocoding status.
-
-    TODO: Implement geocoding status aggregation.
-    """
-    return Response({
-        'total_stations': 0,
-        'geocoded': 0,
+    """Return aggregate station states and the latest persisted job."""
+    counts = {
+        'total': FuelStation.objects.count(),
         'pending': 0,
-        'failed': 0
+        'claimed': 0,
+        'processing': 0,
+        'success': 0,
+        'failed': 0,
+    }
+    grouped_counts = FuelStation.objects.values('geocoding_status').annotate(
+        count=Count('pk')
+    )
+    for group in grouped_counts:
+        counts[group['geocoding_status']] = group['count']
+
+    latest_job = GeocodeJob.objects.order_by('-created_at', '-pk').first()
+    return Response({
+        'counts': counts,
+        'latest_job': (
+            GeocodeJobSerializer(latest_job).data if latest_job else None
+        ),
     })
 
 
