@@ -22,6 +22,16 @@ class GeocodingJobAlreadyRunning(Exception):
 
 class GeocodingService:
     @staticmethod
+    def has_eligible_stations(*, retry_failed=False):
+        eligibility = Q(geocoding_status="pending", geocode_job__isnull=True)
+        if retry_failed:
+            eligibility |= Q(geocoding_status="failed")
+        return FuelStation.objects.filter(
+            Q(latitude__isnull=True) | Q(longitude__isnull=True),
+            eligibility,
+        ).exists()
+
+    @staticmethod
     @transaction.atomic
     def create_job(*, limit, retry_failed):
         job = GeocodeJob.objects.create(

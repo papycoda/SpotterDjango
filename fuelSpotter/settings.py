@@ -115,7 +115,7 @@ WSGI_APPLICATION = 'fuelSpotter.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': os.environ.get('SQLITE_PATH', BASE_DIR / 'db.sqlite3'),
     }
 }
 
@@ -226,6 +226,12 @@ GEOCODING_STALE_AFTER_SECONDS = float(
 )
 GEOCODING_POLL_SECONDS = float(os.environ.get('GEOCODING_POLL_SECONDS', '5'))
 GEOCODING_MAX_RETRIES = int(os.environ.get('GEOCODING_MAX_RETRIES', '5'))
+GEOCODING_AUTO_QUEUE_BATCH_SIZE = int(
+    os.environ.get('GEOCODING_AUTO_QUEUE_BATCH_SIZE', '500')
+)
+if GEOCODING_AUTO_QUEUE_BATCH_SIZE <= 0:
+    raise ImproperlyConfigured('GEOCODING_AUTO_QUEUE_BATCH_SIZE must be positive')
+RUN_APP_ADDRPORT = os.environ.get('RUN_APP_ADDRPORT', '127.0.0.1:8000')
 if (
     GEOCODING_STALE_AFTER_SECONDS
     <= NOMINATIM_TIMEOUT_SECONDS + NOMINATIM_MIN_INTERVAL_SECONDS

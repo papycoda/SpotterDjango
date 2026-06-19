@@ -2,15 +2,78 @@ from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
 
-from django.core.management import call_command
+from django.core.management import call_command, CommandError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from api.clients.nominatim_client import NominatimTransientError
-from api.models import GeocodeJob
+from api.models import FuelStation, GeocodeJob
 
 
 class GeocodingWorkerCommandTests(TestCase):
+    @patch("api.management.commands.run_geocoding_worker.GeocodingService.process_job")
+    def test_once_auto_queue_creates_and_processes_one_bounded_job(self, process_job):
+        FuelStation.objects.create(
+            id="station-1",
+            opis_truckstop_id="opis-1",
+            name="Test Fuel",
+            address="1 Main Street",
+            city="Nashville",
+            state="TN",
+        )
+
+        call_command(
+            "run_geocoding_worker",
+            "--once",
+            "--auto-queue",
+            "1",
+            stdout=StringIO(),
+        )
+
+        job = GeocodeJob.objects.get()
+        self.assertEqual(job.total_stations, 1)
+        process_job.assert_called_once()
+        self.assertEqual(process_job.call_args.args[0], job.id)
+
+    @patch("api.management.commands.run_geocoding_worker.GeocodingService.create_job")
+    @patch("api.management.commands.run_geocoding_worker.GeocodingService.process_job")
+    def test_auto_queue_does_not_create_job_when_pending_job_exists(
+        self, process_job, create_job
+    ):
+        existing = GeocodeJob.objects.create(id="existing")
+
+        call_command(
+            "run_geocoding_worker",
+            "--once",
+            "--auto-queue",
+            "10",
+            stdout=StringIO(),
+        )
+
+        create_job.assert_not_called()
+        self.assertEqual(process_job.call_args.args[0], existing.id)
+
+    def test_auto_queue_rejects_non_positive_batch_size(self):
+        with self.assertRaisesMessage(CommandError, "--auto-queue must be positive"):
+            call_command(
+                "run_geocoding_worker",
+                "--once",
+                "--auto-queue",
+                "0",
+                stdout=StringIO(),
+            )
+
+    def test_auto_queue_does_not_create_empty_job(self):
+        call_command(
+            "run_geocoding_worker",
+            "--once",
+            "--auto-queue",
+            "10",
+            stdout=StringIO(),
+        )
+
+        self.assertFalse(GeocodeJob.objects.exists())
+
     @patch("api.management.commands.run_geocoding_worker.GeocodingService.process_job")
     def test_once_processes_the_oldest_pending_job(self, process_job):
         oldest = GeocodeJob.objects.create(id="oldest")

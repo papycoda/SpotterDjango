@@ -13,3 +13,6 @@ redis==8.0.0
 
 # Environment variables
 python-dotenv==1.2.2
+
+# Production server
+gunicorn==23.0.0

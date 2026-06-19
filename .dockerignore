@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+db.sqlite3
+db.sqlite3-journal
+fuel-prices-for-be-assessment.csv
+docs

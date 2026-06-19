@@ -23,6 +23,7 @@ class EnvironmentSettingsTests(SimpleTestCase):
             "NOMINATIM_TIMEOUT_SECONDS",
             "GEOCODING_STALE_AFTER_SECONDS",
             "GEOCODING_POLL_SECONDS",
+            "SQLITE_PATH",
         ):
             process_environment.pop(key, None)
         process_environment.update(environment)
@@ -120,6 +121,17 @@ class EnvironmentSettingsTests(SimpleTestCase):
 
         self.assertEqual(values["max_range_miles"], 500)
         self.assertEqual(values["mpg"], 10)
+
+    def test_sqlite_path_is_loaded_from_environment(self):
+        values = self.run_settings_probe(
+            {
+                "SECRET_KEY": "test-key",
+                "SQLITE_PATH": "/data/fuelspotter.sqlite3",
+            },
+            "{'database_name': str(settings.DATABASES['default']['NAME'])}",
+        )
+
+        self.assertEqual(values["database_name"], "/data/fuelspotter.sqlite3")
 
     def test_production_requires_an_explicit_secret_key(self):
         process_environment = os.environ.copy()

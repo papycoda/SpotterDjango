@@ -1,0 +1,53 @@
+x-app-environment: &app-environment
+  DEBUG: ${DEBUG:-false}
+  SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+  SQLITE_PATH: /data/db.sqlite3
+  NOMINATIM_BASE_URL: ${NOMINATIM_BASE_URL:-https://nominatim.openstreetmap.org}
+  NOMINATIM_USER_AGENT: ${NOMINATIM_USER_AGENT:?Set an identifying NOMINATIM_USER_AGENT in .env}
+  NOMINATIM_MIN_INTERVAL_SECONDS: ${NOMINATIM_MIN_INTERVAL_SECONDS:-1}
+  NOMINATIM_TIMEOUT_SECONDS: ${NOMINATIM_TIMEOUT_SECONDS:-10}
+  GEOCODING_AUTO_QUEUE_BATCH_SIZE: ${GEOCODING_AUTO_QUEUE_BATCH_SIZE:-500}
+
+services:
+  web:
+    build: .
+    command: >-
+      sh -c "python manage.py migrate --noinput &&
+      gunicorn fuelSpotter.wsgi:application --bind 0.0.0.0:8000"
+    environment: *app-environment
+    ports:
+      - "8000:8000"
+    volumes:
+      - fuelspotter-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command:
+      - python
+      - manage.py
+      - run_geocoding_worker
+      - --watch
+      - --auto-queue
+      - ${GEOCODING_AUTO_QUEUE_BATCH_SIZE:-500}
+    environment: *app-environment
+    volumes:
+      - fuelspotter-data:/data
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  fuelspotter-data:
