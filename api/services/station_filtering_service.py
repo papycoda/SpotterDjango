@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import List
 
 from django.db.models import QuerySet
+from django.conf import settings
 
 from api.models import FuelStation
 
@@ -95,15 +96,23 @@ class StationFilteringService:
             )
         )
 
-        return FuelStation.objects.filter(
-            latitude__gte=min(lats) - latitude_padding,
-            latitude__lte=max(lats) + latitude_padding,
-            longitude__gte=min(lons) - longitude_padding,
-            longitude__lte=max(lons) + longitude_padding,
-            geocoding_status="success",
-            latitude__isnull=False,
-            longitude__isnull=False,
-        )
+        # Build the filter
+        filters = {
+            "latitude__gte": min(lats) - latitude_padding,
+            "latitude__lte": max(lats) + latitude_padding,
+            "longitude__gte": min(lons) - longitude_padding,
+            "longitude__lte": max(lons) + longitude_padding,
+            "geocoding_status": "success",
+            "latitude__isnull": False,
+            "longitude__isnull": False,
+        }
+
+        # Only include stations with exact/manual coordinates unless the setting is enabled
+        if not settings.ALLOW_APPROXIMATE_CITY_COORDINATES_FOR_ROUTE_MATCHING:
+            # For backward compatibility, include 'unknown' source (stations created before this field existed)
+            filters["coordinate_source__in"] = ["exact_station", "manual", "unknown"]
+
+        return FuelStation.objects.filter(**filters)
 
     def calculate_station_route_distance(
         self,

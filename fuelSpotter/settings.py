@@ -256,3 +256,9 @@ SUPPORTED_COUNTRY_CODES = env_list(
 # Fixed assumptions from the backend assessment contract.
 VEHICLE_MAX_RANGE_MILES = 500
 VEHICLE_MPG = 10
+
+# Allow approximate city centroid coordinates for route matching (DEMO ONLY!)
+ALLOW_APPROXIMATE_CITY_COORDINATES_FOR_ROUTE_MATCHING = env_bool(
+    'ALLOW_APPROXIMATE_CITY_COORDINATES_FOR_ROUTE_MATCHING',
+    False
+)

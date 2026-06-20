@@ -31,6 +31,20 @@ class FuelStation(models.Model):
         ('low', 'Low'),
     ]
 
+    COORDINATE_SOURCE_CHOICES = [
+        ('exact_station', 'Exact Station Location'),
+        ('city_centroid', 'City Centroid (Approximate)'),
+        ('manual', 'Manual Coordinates'),
+        ('unknown', 'Unknown Source'),
+    ]
+
+    COORDINATE_QUALITY_CHOICES = [
+        ('high', 'High Quality'),
+        ('medium', 'Medium Quality'),
+        ('approximate', 'Approximate (City Centroid)'),
+        ('unknown', 'Unknown Quality'),
+    ]
+
     id = models.CharField(primary_key=True, max_length=50)
     opis_truckstop_id = models.CharField(max_length=50, unique=True, null=True, blank=True)
     rack_id = models.CharField(max_length=20, blank=True)
@@ -41,6 +55,18 @@ class FuelStation(models.Model):
     price_per_gallon = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     latitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
     longitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
+    coordinate_source = models.CharField(
+        max_length=20,
+        choices=COORDINATE_SOURCE_CHOICES,
+        default='unknown',
+        help_text="Source of station coordinates"
+    )
+    coordinate_quality = models.CharField(
+        max_length=20,
+        choices=COORDINATE_QUALITY_CHOICES,
+        default='unknown',
+        help_text="Quality/accuracy of coordinates"
+    )
     geocoding_status = models.CharField(
         max_length=20,
         choices=GEOCODING_STATUS_CHOICES,
@@ -84,10 +110,34 @@ class FuelStation(models.Model):
             models.Index(fields=['state', 'price_per_gallon']),
             models.Index(fields=['geocoding_status']),
             models.Index(fields=['latitude', 'longitude']),
+            models.Index(fields=['coordinate_source']),
+            models.Index(fields=['coordinate_quality']),
         ]
 
     def __str__(self):
         return f"{self.name} - {self.city}, {self.state}"
+
+
+class CityCoordinate(models.Model):
+    """Model for city centroid coordinates."""
+    city = models.CharField(max_length=100)
+    state = models.CharField(max_length=2)
+    latitude = models.DecimalField(max_digits=10, decimal_places=7)
+    longitude = models.DecimalField(max_digits=10, decimal_places=7)
+    source = models.CharField(max_length=255, default="us_cities_dataset")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['city', 'state'], name='unique_city_state_coordinate')
+        ]
+        indexes = [
+            models.Index(fields=['city', 'state']),
+        ]
+
+    def __str__(self):
+        return f"{self.city}, {self.state}"
 
 
 class ImportJob(models.Model):

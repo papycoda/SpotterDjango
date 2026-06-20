@@ -116,10 +116,11 @@ class GeocodingService:
         return True
 
     @staticmethod
-    def process_job(job_id, *, client=None, worker_id="direct-worker"):
+    def process_job(job_id, *, client=None, worker_id="direct-worker", progress_callback=None):
         if not GeocodingService._start_job(job_id, worker_id):
             return
         client = client or NominatimClient()
+        job = GeocodeJob.objects.get(pk=job_id)
 
         while True:
             with transaction.atomic():
@@ -140,6 +141,11 @@ class GeocodingService:
                     heartbeat_at=timezone.now()
                 )
 
+            # Call progress callback to indicate processing has started for this station
+            if progress_callback:
+                job.refresh_from_db()
+                progress_callback("start", station, job)
+
             try:
                 result = client.geocode(
                     name=station.name,
@@ -159,6 +165,9 @@ class GeocodingService:
                     ),
                 )
                 GeocodingService._refresh_counts(job_id)
+                if progress_callback:
+                    job.refresh_from_db()
+                    progress_callback("transient_error", station, job, exc.reason)
                 raise
             except NominatimPermanentError as exc:
                 result = GeocodingFailure(
@@ -167,9 +176,13 @@ class GeocodingService:
                 )
 
             # Handle GeocodingFailure result
+            success = False
+            failure_reason = None
+            confidence = None
+            stage = None
+            
             if isinstance(result, GeocodingFailure):
                 failure_reason = result.reason
-                # Map transient reasons to retryable behavior
                 if result.transient:
                     FuelStation.objects.filter(
                         pk=station.pk,
@@ -177,24 +190,29 @@ class GeocodingService:
                         geocoding_status="processing",
                     ).update(geocoding_status="claimed")
                     FuelStation.objects.filter(pk=station.pk).update(
-                        geocoding_failure_reason=GeocodingService._safe_failure_reason(
-                            failure_reason
-                        )
+                        geocoding_failure_reason=GeocodingService._safe_failure_reason(failure_reason)
                     )
                     GeocodingService._refresh_counts(job_id)
+                    if progress_callback:
+                        job.refresh_from_db()
+                        progress_callback("transient_error", station, job, failure_reason)
                     raise NominatimTransientError(failure_reason)
-                # Permanent failure
-                FuelStation.objects.filter(pk=station.pk).update(
-                    geocoding_status="failed",
-                    latitude=None,
-                    longitude=None,
-                    geocoding_failure_reason=failure_reason,
-                    geocoding_confidence=None,
-                    geocoding_stage=None,
-                    geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
-                )
+                else:
+                    # Permanent failure
+                    FuelStation.objects.filter(pk=station.pk).update(
+                        geocoding_status="failed",
+                        latitude=None,
+                        longitude=None,
+                        geocoding_failure_reason=failure_reason,
+                        geocoding_confidence=None,
+                        geocoding_stage=None,
+                        geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
+                    )
+                    if progress_callback:
+                        job.refresh_from_db()
+                        progress_callback("failed", station, job, failure_reason)
             elif result is None:
-                # Legacy None result - treat as unknown failure
+                # Legacy None result
                 FuelStation.objects.filter(pk=station.pk).update(
                     geocoding_status="failed",
                     latitude=None,
@@ -204,8 +222,10 @@ class GeocodingService:
                     geocoding_stage=None,
                     geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
                 )
+                if progress_callback:
+                    job.refresh_from_db()
+                    progress_callback("failed", station, job, "unknown")
             else:
-                # Successful geocoding with stage and confidence
                 confidence = getattr(result, "confidence", None)
                 stage = getattr(result, "stage", None)
                 if confidence not in {"high", "medium"} or stage not in {1, 2}:
@@ -218,7 +238,13 @@ class GeocodingService:
                         geocoding_stage=None,
                         geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
                     )
+                    if progress_callback:
+                        job.refresh_from_db()
+                        progress_callback("failed", station, job, "no_match_osm")
                 else:
+                    # Determine coordinate quality based on confidence
+                    coordinate_quality = "high" if confidence == "high" else "medium"
+                    
                     FuelStation.objects.filter(pk=station.pk).update(
                         geocoding_status="success",
                         latitude=result.latitude,
@@ -227,7 +253,14 @@ class GeocodingService:
                         geocoding_confidence=confidence,
                         geocoding_stage=stage,
                         geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
+                        coordinate_source="exact_station",
+                        coordinate_quality=coordinate_quality,
                     )
+                    success = True
+                    if progress_callback:
+                        job.refresh_from_db()
+                        progress_callback("success", station, job, confidence, stage)
+            
             GeocodingService._refresh_counts(job_id)
 
         GeocodingService._complete_job(job_id)
