@@ -81,10 +81,11 @@ class FuelOptimizationService:
         stops: list[FuelStop] = []
         position = Decimal("0")
         fuel = self._tank
+        current_index = 0
 
         # The initial tank is already full. Pick the least expensive station
         # reachable with that fuel; equal prices favor more forward progress.
-        reachable = self._reachable(stations, position, fuel * self._mpg)
+        reachable, current_index = self._reachable(stations, position, fuel * self._mpg, current_index)
         if not reachable:
             raise RouteGapTooLargeError(destination, "entire route (no stations available)")
         current = min(
@@ -97,7 +98,7 @@ class FuelOptimizationService:
             fuel = self._arrival_fuel(fuel, station_miles - position)
             position = station_miles
 
-            target = self._next_target(stations, current, destination)
+            target, current_index = self._next_target(stations, current, destination, current_index)
             target_miles = destination if target is None else target[0]
             gallons_needed = (target_miles - position) / self._mpg
             current_price = Decimal(nearby.station.price_per_gallon)
@@ -179,31 +180,40 @@ class FuelOptimizationService:
         stations: list[tuple[Decimal, NearbyStation]],
         position: Decimal,
         range_miles: Decimal,
-    ) -> list[tuple[Decimal, NearbyStation]]:
-        return [
-            item
-            for item in stations
-            if position < item[0] <= position + range_miles
-        ]
+        start_index: int = 0,
+    ) -> tuple[list[tuple[Decimal, NearbyStation]], int]:
+        # Stations are sorted by progress, so we can find the relevant range efficiently
+        max_progress = position + range_miles
+        reachable = []
+        # Start from the given index since we never need to look backwards
+        for i in range(start_index, len(stations)):
+            item = stations[i]
+            if item[0] <= position:
+                continue
+            if item[0] > max_progress:
+                break
+            reachable.append(item)
+        return reachable, i
 
     def _next_target(
         self,
         stations: list[tuple[Decimal, NearbyStation]],
         current: tuple[Decimal, NearbyStation],
         destination: Decimal,
-    ) -> Optional[tuple[Decimal, NearbyStation]]:
+        start_index: int = 0,
+    ) -> tuple[Optional[tuple[Decimal, NearbyStation]], int]:
         """Return the first cheaper reachable station, else the furthest node."""
         position, nearby = current
-        reachable = self._reachable(stations, position, self._range)
+        reachable, current_index = self._reachable(stations, position, self._range, start_index)
         current_price = Decimal(nearby.station.price_per_gallon)
         for candidate in reachable:
             if Decimal(candidate[1].station.price_per_gallon) < current_price:
-                return candidate
+                return candidate, current_index
         if destination <= position + self._range:
-            return None
+            return None, current_index
         if not reachable:
             raise RouteGapTooLargeError(destination - position, "destination")
-        return reachable[-1]
+        return reachable[-1], current_index
 
     def _arrival_fuel(self, fuel: Decimal, distance_miles: Decimal) -> Decimal:
         remaining = fuel - (distance_miles / self._mpg)

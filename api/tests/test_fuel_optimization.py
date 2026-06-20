@@ -141,9 +141,8 @@ class FuelOptimizationServiceTests(SimpleTestCase):
             normalized = None
 
             def _normalize_stations(self, stations, destination):
-                self.normalized = CountingList(
-                    super()._normalize_stations(stations, destination)
-                )
+                result = super()._normalize_stations(stations, destination)
+                self.normalized = CountingList(result)
                 return self.normalized
 
         station_count = 30
