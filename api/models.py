@@ -11,6 +11,26 @@ class FuelStation(models.Model):
         ('failed', 'Failed'),
     ]
 
+    GEOCODING_FAILURE_REASON_CHOICES = [
+        ('no_match_osm', 'No OSM Match'),
+        ('outside_usa', 'Outside USA'),
+        ('not_fuel_station', 'Not Fuel Station'),
+        ('city_mismatch', 'City Mismatch'),
+        ('state_mismatch', 'State Mismatch'),
+        ('rate_limited', 'Rate Limited'),
+        ('network_error', 'Network Error'),
+        ('upstream_error', 'Upstream Error'),
+        ('invalid_response', 'Invalid Response'),
+        ('invalid_coordinates', 'Invalid Coordinates'),
+        ('unknown', 'Unknown Error'),
+    ]
+
+    GEOCODING_CONFIDENCE_CHOICES = [
+        ('high', 'High'),
+        ('medium', 'Medium'),
+        ('low', 'Low'),
+    ]
+
     id = models.CharField(primary_key=True, max_length=50)
     opis_truckstop_id = models.CharField(max_length=50, unique=True, null=True, blank=True)
     rack_id = models.CharField(max_length=20, blank=True)
@@ -25,6 +45,29 @@ class FuelStation(models.Model):
         max_length=20,
         choices=GEOCODING_STATUS_CHOICES,
         default='pending'
+    )
+    geocoding_failure_reason = models.CharField(
+        max_length=30,
+        choices=GEOCODING_FAILURE_REASON_CHOICES,
+        blank=True,
+        null=True,
+        help_text="Reason why geocoding failed"
+    )
+    geocoding_confidence = models.CharField(
+        max_length=10,
+        choices=GEOCODING_CONFIDENCE_CHOICES,
+        blank=True,
+        null=True,
+        help_text="Confidence level of geocoding result"
+    )
+    geocoding_stage = models.SmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Which stage of geocoding succeeded (1-4)"
+    )
+    geocoding_strategy_version = models.SmallIntegerField(
+        default=0,
+        help_text="Deterministic geocoding strategy version last completed",
     )
     geocode_job = models.ForeignKey(
         'GeocodeJob',

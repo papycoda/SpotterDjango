@@ -6,7 +6,10 @@ from django.test import TestCase
 from django.utils import timezone
 
 from api.clients.nominatim_client import (
+    CURRENT_STRATEGY_VERSION,
     GeocodingResult,
+    GeocodingFailure,
+    NominatimNoMatchError,
     NominatimPermanentError,
     NominatimTransientError,
 )
@@ -60,6 +63,18 @@ class GeocodingServiceTests(TestCase):
         self.assertEqual(failed.geocoding_status, "claimed")
         self.assertTrue(job.retry_failed)
 
+    def test_retry_failed_skips_rows_already_attempted_by_current_strategy(self):
+        stale = self.create_station("1", status="failed")
+        current = self.create_station("2", status="failed")
+        stale.geocoding_strategy_version = CURRENT_STRATEGY_VERSION - 1
+        stale.save(update_fields=["geocoding_strategy_version", "updated_at"])
+        current.geocoding_strategy_version = CURRENT_STRATEGY_VERSION
+        current.save(update_fields=["geocoding_strategy_version", "updated_at"])
+
+        job = GeocodingService.create_job(limit=10, retry_failed=True)
+
+        self.assertEqual(list(job.stations.values_list("pk", flat=True)), ["1"])
+
     def test_explicit_retry_reassigns_failure_from_an_older_job(self):
         failed = self.create_station("1", status="failed")
         older_job = GeocodeJob.objects.create(id="older", status="completed")
@@ -94,6 +109,8 @@ class GeocodingServiceTests(TestCase):
                 latitude=Decimal("32.7767000"),
                 longitude=Decimal("-96.7970000"),
                 display_name="Dallas, Texas, USA",
+                stage=1,
+                confidence="high",
             )
 
         client.geocode.side_effect = geocode
@@ -105,6 +122,8 @@ class GeocodingServiceTests(TestCase):
         self.assertEqual(observed_statuses, ["processing"])
         self.assertEqual(station.geocoding_status, "success")
         self.assertEqual(station.latitude, Decimal("32.7767000"))
+        self.assertEqual(station.geocoding_confidence, "high")
+        self.assertEqual(station.geocoding_stage, 1)
         self.assertEqual(job.status, "completed")
         self.assertEqual(job.processed_count, 1)
         self.assertEqual(job.success_count, 1)
@@ -122,8 +141,8 @@ class GeocodingServiceTests(TestCase):
         job = GeocodingService.create_job(limit=2, retry_failed=False)
         client = Mock()
         client.geocode.side_effect = [
-            None,
-            NominatimPermanentError("sanitized"),
+            GeocodingFailure(reason="no_match_osm", transient=False),
+            GeocodingFailure(reason="not_fuel_station", transient=False),
         ]
 
         GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
@@ -136,6 +155,10 @@ class GeocodingServiceTests(TestCase):
             set(job.stations.values_list("geocoding_status", flat=True)),
             {"failed"},
         )
+        # Check that failure reasons are recorded
+        station1 = job.stations.first()
+        station1.refresh_from_db()
+        self.assertIn(station1.geocoding_failure_reason, ["no_match_osm", "not_fuel_station"])
 
     def test_transient_error_returns_station_to_claimed_for_retry(self):
         station = self.create_station("1")
@@ -176,3 +199,167 @@ class GeocodingServiceTests(TestCase):
         self.assertEqual(job.worker_id, "")
         self.assertEqual(station.geocoding_status, "claimed")
         self.assertEqual(station.geocode_job, job)
+
+    def test_records_failure_reason_on_osm_no_match(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+        client.geocode.return_value = GeocodingFailure(
+            reason="no_match_osm",
+            transient=False
+        )
+
+        GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(station.geocoding_status, "failed")
+        self.assertEqual(station.geocoding_failure_reason, "no_match_osm")
+        self.assertIsNone(station.latitude)
+        self.assertIsNone(station.longitude)
+        self.assertIsNone(station.geocoding_confidence)
+        self.assertIsNone(station.geocoding_stage)
+
+    def test_records_medium_confidence_from_stage_2(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+
+        def geocode(**kwargs):
+            return GeocodingResult(
+                latitude=Decimal("32.7767000"),
+                longitude=Decimal("-96.7970000"),
+                display_name="Shell, Dallas, Texas, USA",
+                stage=2,
+                confidence="medium",
+            )
+
+        client.geocode.side_effect = geocode
+
+        GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(station.geocoding_status, "success")
+        self.assertEqual(station.geocoding_confidence, "medium")
+        self.assertEqual(station.geocoding_stage, 2)
+
+    def test_rejects_low_confidence_stage_3_result(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+
+        def geocode(**kwargs):
+            return GeocodingResult(
+                latitude=Decimal("32.7767000"),
+                longitude=Decimal("-96.7970000"),
+                display_name="Fuel Station, Dallas, Texas, USA",
+                stage=3,
+                confidence="low",
+            )
+
+        client.geocode.side_effect = geocode
+
+        GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(station.geocoding_status, "failed")
+        self.assertEqual(station.geocoding_failure_reason, "no_match_osm")
+        self.assertIsNone(station.latitude)
+        self.assertIsNone(station.longitude)
+        self.assertIsNone(station.geocoding_confidence)
+        self.assertIsNone(station.geocoding_stage)
+
+    def test_permanent_no_match_persists_specific_reason(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+        client.geocode.side_effect = NominatimNoMatchError("city_mismatch")
+
+        GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(station.geocoding_status, "failed")
+        self.assertEqual(station.geocoding_failure_reason, "city_mismatch")
+        self.assertEqual(
+            station.geocoding_strategy_version, CURRENT_STRATEGY_VERSION
+        )
+        self.assertEqual(job.failed_count, 1)
+
+    def test_invalid_response_reason_is_not_downgraded_to_unknown(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+        client.geocode.side_effect = NominatimPermanentError("invalid_response")
+
+        GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        self.assertEqual(station.geocoding_failure_reason, "invalid_response")
+        self.assertEqual(
+            station.geocoding_strategy_version, CURRENT_STRATEGY_VERSION
+        )
+
+    def test_transient_error_persists_reason_while_restoring_claim(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+        client.geocode.side_effect = NominatimTransientError("network_error")
+
+        with self.assertRaises(NominatimTransientError):
+            GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        self.assertEqual(station.geocoding_status, "claimed")
+        self.assertEqual(station.geocoding_failure_reason, "network_error")
+        self.assertEqual(station.geocoding_strategy_version, 0)
+
+    def test_transient_failure_returns_station_to_claimed_for_retry(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+        client.geocode.return_value = GeocodingFailure(
+            reason="rate_limited",
+            transient=True
+        )
+
+        with self.assertRaises(NominatimTransientError):
+            GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(station.geocoding_status, "claimed")
+        self.assertEqual(job.status, "processing")
+        self.assertEqual(job.processed_count, 0)
+
+    def test_records_city_mismatch_failure_reason(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+        client.geocode.return_value = GeocodingFailure(
+            reason="city_mismatch",
+            transient=False
+        )
+
+        GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        self.assertEqual(station.geocoding_failure_reason, "city_mismatch")
+        self.assertEqual(station.geocoding_status, "failed")
+
+    def test_records_not_fuel_station_failure_reason(self):
+        station = self.create_station("1")
+        job = GeocodingService.create_job(limit=1, retry_failed=False)
+        client = Mock()
+        client.geocode.return_value = GeocodingFailure(
+            reason="not_fuel_station",
+            transient=False
+        )
+
+        GeocodingService.process_job(job.id, client=client, worker_id="worker-1")
+
+        station.refresh_from_db()
+        self.assertEqual(station.geocoding_failure_reason, "not_fuel_station")
+        self.assertEqual(station.geocoding_status, "failed")

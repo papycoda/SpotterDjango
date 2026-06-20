@@ -5,24 +5,38 @@ from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.decorators import authentication_classes
+from rest_framework.decorators import parser_classes
 from rest_framework.decorators import permission_classes
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from .models import FuelStation, ImportJob, GeocodeJob
 from .permissions import IsOperationsAdmin
 from .serializers import (
+    ErrorResponseSerializer, HealthResponseSerializer,
     FuelStationSerializer, FuelStationQuerySerializer,
-    ImportJobSerializer, GeocodeJobSerializer, GeocodeRequestSerializer,
+    FuelStationListResponseSerializer, ImportJobSerializer,
+    ImportFuelPricesResponseSerializer,
+    GeocodeJobSerializer, GeocodeRequestSerializer,
     GeocodeStatusResponseSerializer,
     RoutePreviewRequestSerializer, RoutePreviewResponseSerializer,
     FuelPlanRequestSerializer, FuelPlanResponseSerializer,
-    FuelStationsNearRouteRequestSerializer,
+    FuelStationsNearRouteRequestSerializer, FuelStationsNearRouteResponseSerializer,
     LocationValidateRequestSerializer, LocationValidateResponseSerializer,
     FuelEstimateRequestSerializer, FuelEstimateResponseSerializer
 )
 from .services.geocoding_service import GeocodingService
+from .services.fuel_optimization_service import RouteGapTooLargeError
+from .services.fuel_plan_service import FuelPlanService
 
 
 # Health check
+@swagger_auto_schema(
+    method='get',
+    operation_summary='Check API health',
+    operation_description='Returns a lightweight liveness response.',
+    tags=['System'],
+    responses={200: HealthResponseSerializer},
+)
 @api_view(['GET'])
 def health_check(request):
     """Health check endpoint."""
@@ -30,43 +44,201 @@ def health_check(request):
 
 
 # Route planning endpoints
+@swagger_auto_schema(
+    method='post',
+    operation_summary='Preview a route',
+    operation_description=(
+        'Scaffolded endpoint. The final operation will geocode two US locations '
+        'and return one OSRM route without fuel-stop optimization.'
+    ),
+    tags=['Routes'],
+    request_body=RoutePreviewRequestSerializer,
+    responses={
+        200: RoutePreviewResponseSerializer,
+        400: openapi.Response('Invalid request', ErrorResponseSerializer),
+        502: openapi.Response('Upstream routing service failure', ErrorResponseSerializer),
+    },
+)
 @api_view(['POST'])
 def route_preview(request):
     """
     Preview route geometry/distance without fuel optimization.
 
-    TODO: Implement routing logic using RoutingService.
+    Uses geocoding and OSRM routing to return route preview.
     """
+    from api.services.route_service import (
+        plan_route,
+        LocationNotInUSAError,
+        RouteNotFoundError,
+        RoutingTransientError,
+    )
+
     serializer = RoutePreviewRequestSerializer(data=request.data)
-    if serializer.is_valid():
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    start = serializer.validated_data['start']
+    finish = serializer.validated_data['finish']
+
+    try:
+        route_plan = plan_route(start, finish)
+
+        # Convert route geometry to GeoJSON format
+        geojson_geometry = {
+            "type": "LineString",
+            "coordinates": [
+                [float(lon), float(lat)]
+                for lat, lon in route_plan.route_geometry
+            ]
+        }
+
         return Response({
-            'distance_miles': 0.0,
-            'duration_minutes': 0,
-            'geometry': {}
+            'distance_miles': float(route_plan.total_distance_miles),
+            'duration_minutes': int(float(route_plan.total_duration_minutes)),
+            'geometry': geojson_geometry
         })
+
+    except LocationNotInUSAError as exc:
+        return Response(
+            {'error': f'Location not in USA: {exc}'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except RouteNotFoundError as exc:
+        return Response(
+            {'error': f'No route found: {exc}'},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+    except RoutingTransientError as exc:
+        return Response(
+            {'error': f'Routing service unavailable: {exc}'},
+            status=status.HTTP_502_BAD_GATEWAY
+        )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@swagger_auto_schema(
+    method='post',
+    operation_summary='Create an optimized fuel plan',
+    operation_description=(
+        'Primary assignment endpoint. Start and finish must be within the USA. '
+        'The vehicle assumptions are fixed server-side at 500 miles maximum '
+        'range, 10 MPG, and an initial full 50-gallon tank. The completed '
+        'operation will return GeoJSON route geometry, selected fuel stops, '
+        'total fuel purchased, and total en-route fuel cost.'
+    ),
+    tags=['Routes'],
+    request_body=FuelPlanRequestSerializer,
+    responses={
+        200: FuelPlanResponseSerializer,
+        400: openapi.Response('Invalid request', ErrorResponseSerializer),
+        404: openapi.Response('Start or finish could not be resolved', ErrorResponseSerializer),
+        422: openapi.Response('No feasible fuel plan exists', ErrorResponseSerializer),
+        502: openapi.Response('Geocoding or routing service failure', ErrorResponseSerializer),
+    },
+)
 @api_view(['POST'])
 def route_fuel_plan(request):
     """
     Generate optimized fuel plan for a route.
 
-    TODO: Implement fuel optimization logic using FuelOptimizer.
+    Uses geocoding, OSRM routing, station filtering, and fuel optimization
+    to return the most cost-effective fuel stops along the route.
     """
+    from api.services.route_service import (
+        LocationNotInUSAError,
+        RouteNotFoundError,
+        RoutingTransientError,
+    )
+
     serializer = FuelPlanRequestSerializer(data=request.data)
-    if serializer.is_valid():
-        return Response({
-            'start': '',
-            'finish': '',
-            'distance_miles': 0.0,
-            'estimated_fuel_cost': 0.0,
-            'stops': []
-        })
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    if not serializer.is_valid():
+        return Response(
+            {'error': 'Invalid request.', 'details': serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    start = serializer.validated_data['start']
+    finish = serializer.validated_data['finish']
+
+    try:
+        result = FuelPlanService().create_plan(start, finish)
+        route_plan = result.route_plan
+        fuel_plan = result.fuel_plan
+
+        # Step 5: Convert route geometry to GeoJSON format
+        # GeoJSON LineString: {"type": "LineString", "coordinates": [[lon, lat], ...]}
+        geojson_geometry = {
+            "type": "LineString",
+            "coordinates": [
+                [float(lon), float(lat)]
+                for lat, lon in route_plan.route_geometry
+            ]
+        }
+
+        # Step 6: Format fuel stops for response
+        fuel_stops = []
+        for stop in fuel_plan.fuel_stops:
+            fuel_stops.append({
+                'station_id': stop.station.id,
+                'name': stop.station.name,
+                'address': stop.station.address,
+                'city': stop.station.city,
+                'state': stop.station.state,
+                'price_per_gallon': format(stop.station.price_per_gallon, '.2f'),
+                'route_progress_miles': format(stop.route_progress_miles, '.3f'),
+                'gallons_purchased': format(stop.gallons_purchased, '.3f'),
+                'cost_usd': format(stop.cost_usd, '.2f'),
+            })
+
+        # Step 7: Build response
+        response_data = {
+            'start': route_plan.start_geocoded.display_name,
+            'finish': route_plan.end_geocoded.display_name,
+            'distance_miles': float(route_plan.total_distance_miles),
+            'duration_minutes': int(float(route_plan.total_duration_minutes)),
+            'route_geometry': geojson_geometry,
+            'fuel_stops': fuel_stops,
+            'total_fuel_purchased': format(fuel_plan.total_fuel_purchased, '.3f'),
+            'total_fuel_cost': format(fuel_plan.total_cost_usd, '.2f'),
+            'vehicle_assumptions': fuel_plan.vehicle_assumptions,
+        }
+
+        return Response(FuelPlanResponseSerializer(response_data).data)
+
+    except LocationNotInUSAError as exc:
+        return Response(
+            {'error': f'Location not in USA: {exc}'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except RouteNotFoundError as exc:
+        return Response(
+            {'error': f'No route found: {exc}'},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+    except RouteGapTooLargeError as exc:
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    except RoutingTransientError as exc:
+        return Response(
+            {'error': f'Routing service unavailable: {exc}'},
+            status=status.HTTP_502_BAD_GATEWAY
+        )
 
 
 # Fuel station endpoints
+@swagger_auto_schema(
+    method='get',
+    operation_summary='List fuel stations',
+    operation_description='Returns bounded, paginated public station data.',
+    tags=['Fuel stations'],
+    query_serializer=FuelStationQuerySerializer,
+    responses={
+        200: FuelStationListResponseSerializer,
+        400: openapi.Response('Invalid filter or pagination value', ErrorResponseSerializer),
+    },
+)
 @api_view(['GET'])
 @authentication_classes([])
 def fuel_stations_list(request):
@@ -104,6 +276,15 @@ def fuel_stations_list(request):
     })
 
 
+@swagger_auto_schema(
+    method='get',
+    operation_summary='Get a fuel station',
+    tags=['Fuel stations'],
+    responses={
+        200: FuelStationSerializer,
+        404: openapi.Response('Station not found', ErrorResponseSerializer),
+    },
+)
 @api_view(['GET'])
 def fuel_station_detail(request, station_id):
     """
@@ -120,6 +301,21 @@ def fuel_station_detail(request, station_id):
                         status=status.HTTP_404_NOT_FOUND)
 
 
+@swagger_auto_schema(
+    method='post',
+    operation_summary='Find stations near a route',
+    operation_description=(
+        'Scaffolded corridor-matching endpoint. Only already-geocoded stations '
+        'will be eligible; route planning never geocodes stations.'
+    ),
+    tags=['Fuel stations'],
+    request_body=FuelStationsNearRouteRequestSerializer,
+    responses={
+        200: FuelStationsNearRouteResponseSerializer,
+        400: openapi.Response('Invalid request', ErrorResponseSerializer),
+        502: openapi.Response('Upstream routing service failure', ErrorResponseSerializer),
+    },
+)
 @api_view(['POST'])
 def fuel_stations_near_route(request):
     """
@@ -137,7 +333,27 @@ def fuel_stations_near_route(request):
 
 
 # Admin/operations endpoints
+@swagger_auto_schema(
+    method='post',
+    operation_summary='Import fuel prices',
+    operation_description=(
+        'Staff-only scaffolded endpoint for importing the assignment CSV. '
+        'The management command is the currently supported import path.'
+    ),
+    tags=['Operations'],
+    manual_parameters=[openapi.Parameter(
+        'file', openapi.IN_FORM, type=openapi.TYPE_FILE, required=True,
+        description='Fuel-price CSV file.',
+    )],
+    consumes=['multipart/form-data'],
+    responses={
+        200: ImportFuelPricesResponseSerializer,
+        401: openapi.Response('Authentication required', ErrorResponseSerializer),
+        403: openapi.Response('Staff access required', ErrorResponseSerializer),
+    },
+)
 @api_view(['POST'])
+@parser_classes([MultiPartParser])
 @permission_classes([IsOperationsAdmin])
 def admin_import_fuel_prices(request):
     """
@@ -153,6 +369,18 @@ def admin_import_fuel_prices(request):
     })
 
 
+@swagger_auto_schema(
+    method='get',
+    operation_summary='Get fuel-price import status',
+    operation_description='Staff-only scaffolded import-job status endpoint.',
+    tags=['Operations'],
+    responses={
+        200: ImportJobSerializer,
+        401: openapi.Response('Authentication required', ErrorResponseSerializer),
+        403: openapi.Response('Staff access required', ErrorResponseSerializer),
+        404: openapi.Response('Import job not found', ErrorResponseSerializer),
+    },
+)
 @api_view(['GET'])
 @permission_classes([IsOperationsAdmin])
 def admin_import_status(request, import_id):
@@ -172,11 +400,19 @@ def admin_import_status(request, import_id):
 
 @swagger_auto_schema(
     method='post',
+    operation_summary='Queue stations for geocoding',
+    operation_description=(
+        'Staff-only. Claims a bounded persisted batch for the database-backed '
+        'run_geocoding_worker process; no geocoding call occurs in this request.'
+    ),
+    tags=['Operations'],
     request_body=GeocodeRequestSerializer,
     responses={
         200: GeocodeJobSerializer,
         202: GeocodeJobSerializer,
         400: openapi.Response('Invalid geocoding request'),
+        401: openapi.Response('Authentication required', ErrorResponseSerializer),
+        403: openapi.Response('Staff access required', ErrorResponseSerializer),
     },
 )
 @api_view(['POST'])
@@ -200,7 +436,14 @@ def admin_geocode_stations(request):
 
 @swagger_auto_schema(
     method='get',
-    responses={200: GeocodeStatusResponseSerializer},
+    operation_summary='Get geocoding status',
+    operation_description='Staff-only aggregate station states and latest persisted job.',
+    tags=['Operations'],
+    responses={
+        200: GeocodeStatusResponseSerializer,
+        401: openapi.Response('Authentication required', ErrorResponseSerializer),
+        403: openapi.Response('Staff access required', ErrorResponseSerializer),
+    },
 )
 @api_view(['GET'])
 @permission_classes([IsOperationsAdmin])
@@ -230,6 +473,18 @@ def admin_geocode_status(request):
 
 
 # Utility endpoints
+@swagger_auto_schema(
+    method='post',
+    operation_summary='Validate a location',
+    operation_description='Scaffolded endpoint for validating a US location.',
+    tags=['Utilities'],
+    request_body=LocationValidateRequestSerializer,
+    responses={
+        200: LocationValidateResponseSerializer,
+        400: openapi.Response('Invalid request', ErrorResponseSerializer),
+        502: openapi.Response('Upstream geocoding service failure', ErrorResponseSerializer),
+    },
+)
 @api_view(['POST'])
 def location_validate(request):
     """
@@ -249,6 +504,17 @@ def location_validate(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@swagger_auto_schema(
+    method='post',
+    operation_summary='Estimate fuel cost',
+    operation_description='Scaffolded standalone fuel calculation without routing.',
+    tags=['Utilities'],
+    request_body=FuelEstimateRequestSerializer,
+    responses={
+        200: FuelEstimateResponseSerializer,
+        400: openapi.Response('Invalid request', ErrorResponseSerializer),
+    },
+)
 @api_view(['POST'])
 def fuel_estimate(request):
     """

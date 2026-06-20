@@ -16,3 +16,7 @@ python-dotenv==1.2.2
 
 # Production server
 gunicorn==23.0.0
+
+# Geometric operations for route filtering
+shapely==2.1.2
+numpy>=1.21

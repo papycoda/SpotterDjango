@@ -22,6 +22,20 @@ class FuelStationSerializer(serializers.ModelSerializer):
         )
 
 
+class ErrorResponseSerializer(serializers.Serializer):
+    error = serializers.CharField()
+    details = serializers.DictField(required=False)
+
+
+class HealthResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+
+
+class FuelStationListResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField(min_value=0)
+    results = FuelStationSerializer(many=True)
+
+
 class FuelStationQuerySerializer(serializers.Serializer):
     state = serializers.RegexField(
         r'^[A-Za-z]{2}$',
@@ -61,6 +75,13 @@ class ImportJobSerializer(serializers.ModelSerializer):
     class Meta:
         model = ImportJob
         fields = '__all__'
+
+
+class ImportFuelPricesResponseSerializer(serializers.Serializer):
+    imported = serializers.IntegerField(min_value=0)
+    deduplicated = serializers.IntegerField(min_value=0)
+    invalid_rows = serializers.IntegerField(min_value=0)
+    message = serializers.CharField()
 
 
 class GeocodeJobSerializer(serializers.ModelSerializer):
@@ -112,9 +133,44 @@ class RoutePreviewResponseSerializer(serializers.Serializer):
     geometry = serializers.DictField()
 
 
+class FuelStationsNearRouteResponseSerializer(serializers.Serializer):
+    route_distance_miles = serializers.FloatField(min_value=0)
+    stations = FuelStationSerializer(many=True)
+
+
 class FuelPlanRequestSerializer(serializers.Serializer):
     start = serializers.CharField()
     finish = serializers.CharField()
+
+
+class GeoJSONLineStringSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=("LineString",))
+    coordinates = serializers.ListField(
+        child=serializers.ListField(
+            child=serializers.FloatField(),
+            min_length=2,
+            max_length=2,
+        ),
+        min_length=2,
+    )
+
+
+class FuelStopResponseSerializer(serializers.Serializer):
+    station_id = serializers.CharField()
+    name = serializers.CharField()
+    address = serializers.CharField()
+    city = serializers.CharField()
+    state = serializers.CharField()
+    price_per_gallon = serializers.RegexField(r"^\d+\.\d{2}$")
+    route_progress_miles = serializers.RegexField(r"^\d+\.\d{3}$")
+    gallons_purchased = serializers.RegexField(r"^\d+\.\d{3}$")
+    cost_usd = serializers.RegexField(r"^\d+\.\d{2}$")
+
+
+class VehicleAssumptionsSerializer(serializers.Serializer):
+    range_miles = serializers.IntegerField(min_value=1)
+    mpg = serializers.IntegerField(min_value=1)
+    tank_gallons = serializers.IntegerField(min_value=1)
 
 
 class FuelPlanResponseSerializer(serializers.Serializer):
@@ -122,9 +178,11 @@ class FuelPlanResponseSerializer(serializers.Serializer):
     finish = serializers.CharField()
     distance_miles = serializers.FloatField()
     duration_minutes = serializers.IntegerField(min_value=0)
-    route_geometry = serializers.DictField()
-    fuel_stops = serializers.ListField(child=serializers.DictField())
-    total_fuel_cost = serializers.DecimalField(max_digits=12, decimal_places=2)
+    route_geometry = GeoJSONLineStringSerializer()
+    fuel_stops = FuelStopResponseSerializer(many=True)
+    total_fuel_purchased = serializers.RegexField(r"^\d+\.\d{3}$")
+    total_fuel_cost = serializers.RegexField(r"^\d+\.\d{2}$")
+    vehicle_assumptions = VehicleAssumptionsSerializer()
 
 
 class FuelStationsNearRouteRequestSerializer(serializers.Serializer):

@@ -9,9 +9,11 @@ from django.db.models import Q
 from django.utils import timezone
 
 from api.clients.nominatim_client import (
+    CURRENT_STRATEGY_VERSION,
     NominatimClient,
     NominatimPermanentError,
     NominatimTransientError,
+    GeocodingFailure,
 )
 from api.models import FuelStation, GeocodeJob
 
@@ -21,11 +23,16 @@ class GeocodingJobAlreadyRunning(Exception):
 
 
 class GeocodingService:
+    CURRENT_STRATEGY_VERSION = CURRENT_STRATEGY_VERSION
+
     @staticmethod
     def has_eligible_stations(*, retry_failed=False):
         eligibility = Q(geocoding_status="pending", geocode_job__isnull=True)
         if retry_failed:
-            eligibility |= Q(geocoding_status="failed")
+            eligibility |= Q(
+                geocoding_status="failed",
+                geocoding_strategy_version__lt=CURRENT_STRATEGY_VERSION,
+            )
         return FuelStation.objects.filter(
             Q(latitude__isnull=True) | Q(longitude__isnull=True),
             eligibility,
@@ -42,7 +49,10 @@ class GeocodingService:
         eligibility = Q(geocoding_status="pending", geocode_job__isnull=True)
         if retry_failed:
             eligible_statuses.append("failed")
-            eligibility |= Q(geocoding_status="failed")
+            eligibility |= Q(
+                geocoding_status="failed",
+                geocoding_strategy_version__lt=CURRENT_STRATEGY_VERSION,
+            )
 
         stations = FuelStation.objects.filter(
             Q(latitude__isnull=True) | Q(longitude__isnull=True),
@@ -137,32 +147,97 @@ class GeocodingService:
                     city=station.city,
                     state=station.state,
                 )
-            except NominatimTransientError:
+            except NominatimTransientError as exc:
                 FuelStation.objects.filter(
                     pk=station.pk,
                     geocode_job_id=job_id,
                     geocoding_status="processing",
-                ).update(geocoding_status="claimed")
+                ).update(
+                    geocoding_status="claimed",
+                    geocoding_failure_reason=GeocodingService._safe_failure_reason(
+                        exc.reason
+                    ),
+                )
                 GeocodingService._refresh_counts(job_id)
                 raise
-            except NominatimPermanentError:
-                result = None
+            except NominatimPermanentError as exc:
+                result = GeocodingFailure(
+                    reason=GeocodingService._safe_failure_reason(exc.reason),
+                    transient=False,
+                )
 
-            if result is None:
+            # Handle GeocodingFailure result
+            if isinstance(result, GeocodingFailure):
+                failure_reason = result.reason
+                # Map transient reasons to retryable behavior
+                if result.transient:
+                    FuelStation.objects.filter(
+                        pk=station.pk,
+                        geocode_job_id=job_id,
+                        geocoding_status="processing",
+                    ).update(geocoding_status="claimed")
+                    FuelStation.objects.filter(pk=station.pk).update(
+                        geocoding_failure_reason=GeocodingService._safe_failure_reason(
+                            failure_reason
+                        )
+                    )
+                    GeocodingService._refresh_counts(job_id)
+                    raise NominatimTransientError(failure_reason)
+                # Permanent failure
                 FuelStation.objects.filter(pk=station.pk).update(
                     geocoding_status="failed",
                     latitude=None,
                     longitude=None,
+                    geocoding_failure_reason=failure_reason,
+                    geocoding_confidence=None,
+                    geocoding_stage=None,
+                    geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
+                )
+            elif result is None:
+                # Legacy None result - treat as unknown failure
+                FuelStation.objects.filter(pk=station.pk).update(
+                    geocoding_status="failed",
+                    latitude=None,
+                    longitude=None,
+                    geocoding_failure_reason="unknown",
+                    geocoding_confidence=None,
+                    geocoding_stage=None,
+                    geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
                 )
             else:
-                FuelStation.objects.filter(pk=station.pk).update(
-                    geocoding_status="success",
-                    latitude=result.latitude,
-                    longitude=result.longitude,
-                )
+                # Successful geocoding with stage and confidence
+                confidence = getattr(result, "confidence", None)
+                stage = getattr(result, "stage", None)
+                if confidence not in {"high", "medium"} or stage not in {1, 2}:
+                    FuelStation.objects.filter(pk=station.pk).update(
+                        geocoding_status="failed",
+                        latitude=None,
+                        longitude=None,
+                        geocoding_failure_reason="no_match_osm",
+                        geocoding_confidence=None,
+                        geocoding_stage=None,
+                        geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
+                    )
+                else:
+                    FuelStation.objects.filter(pk=station.pk).update(
+                        geocoding_status="success",
+                        latitude=result.latitude,
+                        longitude=result.longitude,
+                        geocoding_failure_reason=None,
+                        geocoding_confidence=confidence,
+                        geocoding_stage=stage,
+                        geocoding_strategy_version=CURRENT_STRATEGY_VERSION,
+                    )
             GeocodingService._refresh_counts(job_id)
 
         GeocodingService._complete_job(job_id)
+
+    @staticmethod
+    def _safe_failure_reason(reason):
+        allowed = {
+            choice[0] for choice in FuelStation.GEOCODING_FAILURE_REASON_CHOICES
+        }
+        return reason if reason in allowed else "unknown"
 
     @staticmethod
     def _refresh_counts(job_id):

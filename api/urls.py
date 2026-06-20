@@ -8,10 +8,12 @@ schema_view = get_schema_view(
     openapi.Info(
         title='FuelSpotter API',
         default_version='v1',
-        description='Route fuel planning and fuel station management API',
-        terms_of_service='https://www.google.com/policies/terms/',
-        contact=openapi.Contact(email='contact@example.com'),
-        license=openapi.License(name='MIT License'),
+        description=(
+            'USA route fuel-planning API. The primary fuel-plan operation uses '
+            'a fixed 500-mile vehicle range, 10 MPG fuel economy, and an initial '
+            'full 50-gallon tank. Station geocoding is an offline operational '
+            'workflow and is never performed during route planning.'
+        ),
     ),
     public=True,
     permission_classes=(permissions.AllowAny,),

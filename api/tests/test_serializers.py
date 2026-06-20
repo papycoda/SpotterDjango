@@ -1,5 +1,3 @@
-from decimal import Decimal
-
 from django.test import SimpleTestCase
 
 from api import serializers
@@ -74,13 +72,22 @@ class FuelPlanResponseSerializerTests(SimpleTestCase):
                     {
                         "station_id": "123",
                         "name": "Example Truck Stop",
-                        "distance_from_start_miles": 450.0,
+                        "address": "100 Main St",
+                        "city": "Amarillo",
+                        "state": "TX",
                         "price_per_gallon": "3.49",
-                        "gallons_purchased": 42.5,
-                        "cost": "148.33",
+                        "route_progress_miles": "450.000",
+                        "gallons_purchased": "42.500",
+                        "cost_usd": "148.33",
                     }
                 ],
+                "total_fuel_purchased": "42.500",
                 "total_fuel_cost": "148.33",
+                "vehicle_assumptions": {
+                    "range_miles": 500,
+                    "mpg": 10,
+                    "tank_gallons": 50,
+                },
             }
         )
 
@@ -88,5 +95,31 @@ class FuelPlanResponseSerializerTests(SimpleTestCase):
         self.assertIn("route_geometry", serializer.validated_data)
         self.assertIn("fuel_stops", serializer.validated_data)
         self.assertEqual(
-            serializer.validated_data["total_fuel_cost"], Decimal("148.33")
+            serializer.validated_data["total_fuel_cost"], "148.33"
         )
+
+    def test_rejects_decimal_values_without_fixed_precision(self):
+        serializer = FuelPlanResponseSerializer(
+            data={
+                "start": "Chicago, IL",
+                "finish": "Dallas, TX",
+                "distance_miles": 925.4,
+                "duration_minutes": 840,
+                "route_geometry": {
+                    "type": "LineString",
+                    "coordinates": [[-87.63, 41.88], [-96.8, 32.78]],
+                },
+                "fuel_stops": [],
+                "total_fuel_purchased": "42.5",
+                "total_fuel_cost": "148.3",
+                "vehicle_assumptions": {
+                    "range_miles": 500,
+                    "mpg": 10,
+                    "tank_gallons": 50,
+                },
+            }
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("total_fuel_purchased", serializer.errors)
+        self.assertIn("total_fuel_cost", serializer.errors)

@@ -7,6 +7,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 
 from api.clients.nominatim_client import (
     NominatimClient,
+    NominatimNoMatchError,
     NominatimPermanentError,
     NominatimTransientError,
 )
@@ -19,9 +20,7 @@ class DatabaseRateLimiterTests(TestCase):
         now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
         sleeps = []
         limiter = DatabaseRateLimiter(
-            interval_seconds=1,
-            clock=lambda: now,
-            sleeper=sleeps.append,
+            interval_seconds=1, clock=lambda: now, sleeper=sleeps.append
         )
 
         limiter.acquire()
@@ -41,209 +40,186 @@ class NominatimClientTests(SimpleTestCase):
     def setUp(self):
         self.session = Mock()
         self.limiter = Mock()
-        self.client = NominatimClient(
-            session=self.session,
-            rate_limiter=self.limiter,
-        )
+        self.client = NominatimClient(session=self.session, rate_limiter=self.limiter)
 
-    def response(self, status_code=200, payload=None):
+    @staticmethod
+    def response(status_code=200, payload=None):
         response = Mock(status_code=status_code)
         response.json.return_value = payload
         return response
 
-    def test_geocodes_a_named_station_in_the_expected_state(self):
-        self.session.get.return_value = self.response(
-            payload=[{
-                "lat": "32.7767",
-                "lon": "-96.7970",
-                "display_name": "Love's Travel Stop, Dallas, Texas, USA",
-                "category": "highway",
-                "type": "services",
-                "address": {
-                    "ISO3166-2-lvl4": "US-TX",
-                    "city": "Dallas",
-                },
-            }]
-        )
+    @staticmethod
+    def candidate(**overrides):
+        value = {
+            "lat": "32.7767",
+            "lon": "-96.7970",
+            "display_name": "Love's Travel Stop, 100 Main Street, Dallas, Texas",
+            "category": "amenity",
+            "type": "fuel",
+            "address": {
+                "house_number": "100",
+                "road": "Main Street",
+                "city": "Dallas",
+                "ISO3166-2-lvl4": "US-TX",
+            },
+            "namedetails": {"name": "Love's Travel Stop", "brand": "Love's"},
+            "extratags": {"brand": "Love's", "amenity": "fuel"},
+        }
+        value.update(overrides)
+        return value
+
+    def test_high_confidence_requires_identity_and_address_evidence(self):
+        self.session.get.return_value = self.response(payload=[self.candidate()])
 
         result = self.client.geocode(
-            name="Loves Travel Stop #429",
+            name="Love's Travel Stop #429",
             address="100 Main St",
             city="Dallas",
             state="TX",
         )
 
-        self.limiter.acquire.assert_called_once_with()
-        self.session.get.assert_called_once_with(
-            "https://geo.example.test/search",
-            params={
-                "q": "Love's Travel Stop, Dallas, TX, USA",
-                "countrycodes": "us",
-                "format": "jsonv2",
-                "addressdetails": 1,
-                "limit": 5,
-            },
-            headers={"User-Agent": "FuelSpotterTests/1.0"},
-            timeout=4.5,
-        )
+        self.assertEqual(result.confidence, "high")
+        self.assertEqual(result.stage, 1)
         self.assertEqual(result.latitude, Decimal("32.7767000"))
-        self.assertEqual(result.longitude, Decimal("-96.7970000"))
+        params = self.session.get.call_args.kwargs["params"]
+        self.assertEqual(params["namedetails"], 1)
+        self.assertEqual(params["extratags"], 1)
+        self.assertEqual(params["limit"], 10)
 
-    def test_returns_none_when_no_address_matches(self):
-        self.session.get.return_value = self.response(payload=[])
-
-        result = self.client.geocode(
-            name="Missing Stop",
-            address="Missing",
-            city="Nowhere",
-            state="TX",
+    def test_medium_confidence_accepts_identity_without_address_evidence(self):
+        candidate = self.candidate(
+            display_name="Pilot Travel Center, Memphis, Tennessee",
+            address={"city": "Memphis", "ISO3166-2-lvl4": "US-TN"},
+            namedetails={"name": "Pilot Travel Center", "brand": "Pilot"},
+            extratags={"brand": "Pilot", "amenity": "fuel"},
         )
-
-        self.assertIsNone(result)
-
-    def test_rejects_city_or_road_fallbacks_as_station_coordinates(self):
-        self.session.get.return_value = self.response(payload=[{
-            "lat": "38.4620932",
-            "lon": "-99.3053414",
-            "display_name": "US 50, Kansas, USA",
-            "category": "highway",
-            "type": "primary",
-            "address": {
-                "ISO3166-2-lvl4": "US-KS",
-                "city": "Florence",
-            },
-        }])
+        self.session.get.return_value = self.response(payload=[candidate])
 
         result = self.client.geocode(
-            name="Flint Hills Fuel Mart",
-            address="US-50 & US-77",
-            city="Florence",
-            state="KS",
-        )
-
-        self.assertIsNone(result)
-
-    def test_selects_station_feature_matching_the_requested_state(self):
-        self.session.get.return_value = self.response(payload=[
-            {
-                "lat": "33.0",
-                "lon": "-84.0",
-                "display_name": "Pilot Travel Center, Georgia, USA",
-                "category": "highway",
-                "type": "services",
-                "address": {
-                    "ISO3166-2-lvl4": "US-GA",
-                    "city": "Augusta",
-                },
-            },
-            {
-                "lat": "37.0976952",
-                "lon": "-88.6914019",
-                "display_name": "Pilot Travel Center, Paducah, Kentucky, USA",
-                "category": "highway",
-                "type": "services",
-                "address": {
-                    "ISO3166-2-lvl4": "US-KY",
-                    "city": "Paducah",
-                },
-            },
-        ])
-
-        result = self.client.geocode(
-            name="PILOT TRAVEL CENTERS #358",
-            address="I-24 & US-305, EXIT 3",
-            city="Paducah",
-            state="KY",
-        )
-
-        self.assertEqual(result.latitude, Decimal("37.0976952"))
-
-    def test_rejects_same_brand_in_the_wrong_city(self):
-        self.session.get.return_value = self.response(payload=[{
-            "lat": "36.2051981",
-            "lon": "-86.7718598",
-            "display_name": "Love's Travel Stop, Nashville, Tennessee, USA",
-            "category": "highway",
-            "type": "services",
-            "address": {
-                "ISO3166-2-lvl4": "US-TN",
-                "city": "Nashville",
-            },
-        }])
-
-        result = self.client.geocode(
-            name="Loves Travel Stop #429",
-            address="I-65",
+            name="Pilot Travel Center #10",
+            address="I-40 Exit 1",
             city="Memphis",
             state="TN",
         )
 
-        self.assertIsNone(result)
+        self.assertEqual(result.confidence, "medium")
+        self.assertEqual(result.stage, 1)
 
-    def test_maps_network_rate_limit_and_server_errors_to_transient(self):
-        cases = (
-            requests.RequestException("offline"),
-            self.response(status_code=429),
-            self.response(status_code=503),
+    def test_never_accepts_an_unrelated_same_city_station(self):
+        unrelated = self.candidate(
+            display_name="Quick Fuel, Florence, Kansas",
+            address={"city": "Florence", "ISO3166-2-lvl4": "US-KS"},
+            namedetails={"name": "Quick Fuel", "brand": "Quick Fuel"},
+            extratags={"amenity": "fuel"},
         )
-        for outcome in cases:
-            with self.subTest(outcome=outcome):
-                if isinstance(outcome, Exception):
-                    self.session.get.side_effect = outcome
-                    self.session.get.return_value = None
-                else:
-                    self.session.get.side_effect = None
-                    self.session.get.return_value = outcome
-                with self.assertRaises(NominatimTransientError):
+        self.session.get.side_effect = [
+            self.response(payload=[unrelated]),
+            self.response(payload=[]),
+        ]
+
+        with self.assertRaises(NominatimNoMatchError) as raised:
+            self.client.geocode(
+                name="Independent Truck Stop",
+                address="US-50 Exit 2",
+                city="Florence",
+                state="KS",
+            )
+
+        self.assertEqual(raised.exception.reason, "no_match_osm")
+        self.assertEqual(self.session.get.call_count, 2)
+
+    def test_generic_station_name_is_not_identity_evidence(self):
+        candidate = self.candidate(
+            namedetails={"name": "Quick Fuel"},
+            extratags={"brand": "Quick Fuel", "amenity": "fuel"},
+        )
+        self.session.get.side_effect = [
+            self.response(payload=[candidate]), self.response(payload=[])
+        ]
+
+        with self.assertRaises(NominatimNoMatchError):
+            self.client.geocode(
+                name="Station", address="100 Main St", city="Dallas", state="TX"
+            )
+
+    def test_rejects_state_locality_and_non_fuel_candidates_with_specific_reason(self):
+        cases = (
+            ({"address": {"city": "Dallas", "ISO3166-2-lvl4": "US-OK"}}, "state_mismatch"),
+            ({"address": {"city": "Austin", "ISO3166-2-lvl4": "US-TX"}}, "city_mismatch"),
+            ({"category": "highway", "type": "primary"}, "not_fuel_station"),
+        )
+        for overrides, reason in cases:
+            with self.subTest(reason=reason):
+                self.session.get.reset_mock()
+                self.session.get.side_effect = [
+                    self.response(payload=[self.candidate(**overrides)]),
+                    self.response(payload=[]),
+                ]
+                with self.assertRaises(NominatimNoMatchError) as raised:
                     self.client.geocode(
-                        name="Station",
-                        address="100 Main",
+                        name="Love's Travel Stop",
+                        address="100 Main St",
                         city="Dallas",
                         state="TX",
                     )
+                self.assertEqual(raised.exception.reason, reason)
 
-    def test_maps_bad_status_and_malformed_payload_to_permanent(self):
-        responses = (
-            self.response(status_code=400),
-            self.response(payload={"lat": "32"}),
-            self.response(payload=[{
-                "lat": "invalid", "lon": "-96",
-                "category": "amenity", "type": "fuel",
-                "address": {
-                    "ISO3166-2-lvl4": "US-TX",
-                    "city": "Dallas",
-                },
-            }]),
-            self.response(payload=[{
-                "lat": "91", "lon": "-96",
-                "category": "amenity", "type": "fuel",
-                "address": {
-                    "ISO3166-2-lvl4": "US-TX",
-                    "city": "Dallas",
-                },
-            }]),
+    def test_convenience_shop_requires_explicit_fuel_evidence(self):
+        candidate = self.candidate(
+            category="shop", type="convenience", extratags={"brand": "Love's"}
         )
-        for response in responses:
-            with self.subTest(response=response):
+        self.session.get.side_effect = [
+            self.response(payload=[candidate]), self.response(payload=[])
+        ]
+
+        with self.assertRaises(NominatimNoMatchError) as raised:
+            self.client.geocode(
+                name="Love's Travel Stop", address="100 Main", city="Dallas", state="TX"
+            )
+
+        self.assertEqual(raised.exception.reason, "not_fuel_station")
+
+    def test_network_and_upstream_failures_remain_typed_transient_errors(self):
+        cases = (
+            (requests.RequestException("offline"), "network_error"),
+            (self.response(status_code=429), "rate_limited"),
+            (self.response(status_code=503), "upstream_error"),
+        )
+        for outcome, reason in cases:
+            with self.subTest(reason=reason):
+                self.session.get.side_effect = outcome if isinstance(outcome, Exception) else None
+                self.session.get.return_value = None if isinstance(outcome, Exception) else outcome
+                with self.assertRaises(NominatimTransientError) as raised:
+                    self.client.geocode(
+                        name="Station", address="100 Main", city="Dallas", state="TX"
+                    )
+                self.assertEqual(raised.exception.reason, reason)
+
+    def test_bad_response_and_invalid_coordinates_are_permanent(self):
+        cases = (
+            (self.response(status_code=400), "upstream_error"),
+            (self.response(payload={"lat": "32"}), "invalid_response"),
+            (self.response(payload=[self.candidate(lat="invalid")]), "invalid_coordinates"),
+            (self.response(payload=[self.candidate(lat="91")]), "invalid_coordinates"),
+        )
+        for response, reason in cases:
+            with self.subTest(reason=reason):
                 self.session.get.side_effect = None
                 self.session.get.return_value = response
-                with self.assertRaises(NominatimPermanentError):
+                with self.assertRaises(NominatimPermanentError) as raised:
                     self.client.geocode(
-                        name="Station",
-                        address="100 Main",
-                        city="Dallas",
-                        state="TX",
+                        name="Love's", address="100 Main", city="Dallas", state="TX"
                     )
+                self.assertEqual(raised.exception.reason, reason)
 
-    def test_maps_invalid_json_to_permanent(self):
+    def test_invalid_json_is_permanent(self):
         response = self.response()
         response.json.side_effect = ValueError("bad json")
         self.session.get.return_value = response
 
-        with self.assertRaises(NominatimPermanentError):
+        with self.assertRaises(NominatimPermanentError) as raised:
             self.client.geocode(
-                name="Station",
-                address="100 Main",
-                city="Dallas",
-                state="TX",
+                name="Station", address="100 Main", city="Dallas", state="TX"
             )
+
+        self.assertEqual(raised.exception.reason, "invalid_response")
