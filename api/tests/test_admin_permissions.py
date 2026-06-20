@@ -20,12 +20,6 @@ class OperationsAdminPermissionTests(APITestCase):
 
     def operation_requests(self):
         return (
-            ("post", reverse("admin-import-fuel-prices"), {}),
-            (
-                "get",
-                reverse("admin-import-status", kwargs={"import_id": "job-1"}),
-                None,
-            ),
             ("post", reverse("admin-geocode-stations"), {}),
             ("get", reverse("admin-geocode-status"), None),
         )

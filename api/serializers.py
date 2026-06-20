@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from rest_framework import serializers
-from .models import FuelStation, ImportJob, GeocodeJob
+from .models import FuelStation, GeocodeJob
 
 
 class FuelStationSerializer(serializers.ModelSerializer):
@@ -70,20 +70,6 @@ class FuelStationQuerySerializer(serializers.Serializer):
         return attrs
 
 
-class ImportJobSerializer(serializers.ModelSerializer):
-    """Serializer for ImportJob model."""
-    class Meta:
-        model = ImportJob
-        fields = '__all__'
-
-
-class ImportFuelPricesResponseSerializer(serializers.Serializer):
-    imported = serializers.IntegerField(min_value=0)
-    deduplicated = serializers.IntegerField(min_value=0)
-    invalid_rows = serializers.IntegerField(min_value=0)
-    message = serializers.CharField()
-
-
 class GeocodeJobSerializer(serializers.ModelSerializer):
     """Serializer for GeocodeJob model."""
     class Meta:
@@ -133,11 +119,6 @@ class RoutePreviewResponseSerializer(serializers.Serializer):
     geometry = serializers.DictField()
 
 
-class FuelStationsNearRouteResponseSerializer(serializers.Serializer):
-    route_distance_miles = serializers.FloatField(min_value=0)
-    stations = FuelStationSerializer(many=True)
-
-
 class FuelPlanRequestSerializer(serializers.Serializer):
     start = serializers.CharField()
     finish = serializers.CharField()
@@ -183,32 +164,3 @@ class FuelPlanResponseSerializer(serializers.Serializer):
     total_fuel_purchased = serializers.RegexField(r"^\d+\.\d{3}$")
     total_fuel_cost = serializers.RegexField(r"^\d+\.\d{2}$")
     vehicle_assumptions = VehicleAssumptionsSerializer()
-
-
-class FuelStationsNearRouteRequestSerializer(serializers.Serializer):
-    start = serializers.CharField()
-    finish = serializers.CharField()
-    corridor_miles = serializers.FloatField()
-
-
-class LocationValidateRequestSerializer(serializers.Serializer):
-    location = serializers.CharField()
-
-
-class LocationValidateResponseSerializer(serializers.Serializer):
-    valid = serializers.BooleanField()
-    formatted_address = serializers.CharField()
-    latitude = serializers.FloatField()
-    longitude = serializers.FloatField()
-    country = serializers.CharField()
-
-
-class FuelEstimateRequestSerializer(serializers.Serializer):
-    distance_miles = serializers.FloatField()
-    mpg = serializers.FloatField()
-    average_price_per_gallon = serializers.FloatField()
-
-
-class FuelEstimateResponseSerializer(serializers.Serializer):
-    gallons_needed = serializers.FloatField()
-    estimated_cost = serializers.FloatField()

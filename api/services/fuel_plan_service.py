@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from django.conf import settings
+
 from api.services.fuel_optimization_service import FuelOptimizationService, FuelPlan
 from api.services.route_service import RoutePlan, RouteService
 from api.services.routing_service import RouteGeometry
@@ -30,7 +32,7 @@ class FuelPlanService:
         route_plan = self.route_service.plan_route(start, finish)
         nearby_stations = self.filtering_service.find_nearby_stations(
             route_geometry=route_plan.route_geometry,
-            max_distance_m=1000,
+            max_distance_m=settings.FUEL_ROUTE_CORRIDOR_MILES * 1609.344,
         )
         route_geometry = RouteGeometry(
             distance_miles=route_plan.total_distance_miles,

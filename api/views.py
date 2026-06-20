@@ -5,24 +5,18 @@ from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.decorators import authentication_classes
-from rest_framework.decorators import parser_classes
 from rest_framework.decorators import permission_classes
-from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
-from .models import FuelStation, ImportJob, GeocodeJob
+from .models import FuelStation, GeocodeJob
 from .permissions import IsOperationsAdmin
 from .serializers import (
     ErrorResponseSerializer, HealthResponseSerializer,
     FuelStationSerializer, FuelStationQuerySerializer,
-    FuelStationListResponseSerializer, ImportJobSerializer,
-    ImportFuelPricesResponseSerializer,
+    FuelStationListResponseSerializer,
     GeocodeJobSerializer, GeocodeRequestSerializer,
     GeocodeStatusResponseSerializer,
     RoutePreviewRequestSerializer, RoutePreviewResponseSerializer,
     FuelPlanRequestSerializer, FuelPlanResponseSerializer,
-    FuelStationsNearRouteRequestSerializer, FuelStationsNearRouteResponseSerializer,
-    LocationValidateRequestSerializer, LocationValidateResponseSerializer,
-    FuelEstimateRequestSerializer, FuelEstimateResponseSerializer
 )
 from .services.geocoding_service import GeocodingService
 from .services.fuel_optimization_service import RouteGapTooLargeError
@@ -48,8 +42,8 @@ def health_check(request):
     method='post',
     operation_summary='Preview a route',
     operation_description=(
-        'Scaffolded endpoint. The final operation will geocode two US locations '
-        'and return one OSRM route without fuel-stop optimization.'
+        'Geocodes two US locations and returns one OSRM route without '
+        'fuel-stop optimization.'
     ),
     tags=['Routes'],
     request_body=RoutePreviewRequestSerializer,
@@ -301,103 +295,7 @@ def fuel_station_detail(request, station_id):
                         status=status.HTTP_404_NOT_FOUND)
 
 
-@swagger_auto_schema(
-    method='post',
-    operation_summary='Find stations near a route',
-    operation_description=(
-        'Scaffolded corridor-matching endpoint. Only already-geocoded stations '
-        'will be eligible; route planning never geocodes stations.'
-    ),
-    tags=['Fuel stations'],
-    request_body=FuelStationsNearRouteRequestSerializer,
-    responses={
-        200: FuelStationsNearRouteResponseSerializer,
-        400: openapi.Response('Invalid request', ErrorResponseSerializer),
-        502: openapi.Response('Upstream routing service failure', ErrorResponseSerializer),
-    },
-)
-@api_view(['POST'])
-def fuel_stations_near_route(request):
-    """
-    Find fuel stations near a route corridor.
-
-    TODO: Implement corridor matching logic using StationMatchingService.
-    """
-    serializer = FuelStationsNearRouteRequestSerializer(data=request.data)
-    if serializer.is_valid():
-        return Response({
-            'route_distance_miles': 0.0,
-            'stations': []
-        })
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
 # Admin/operations endpoints
-@swagger_auto_schema(
-    method='post',
-    operation_summary='Import fuel prices',
-    operation_description=(
-        'Staff-only scaffolded endpoint for importing the assignment CSV. '
-        'The management command is the currently supported import path.'
-    ),
-    tags=['Operations'],
-    manual_parameters=[openapi.Parameter(
-        'file', openapi.IN_FORM, type=openapi.TYPE_FILE, required=True,
-        description='Fuel-price CSV file.',
-    )],
-    consumes=['multipart/form-data'],
-    responses={
-        200: ImportFuelPricesResponseSerializer,
-        401: openapi.Response('Authentication required', ErrorResponseSerializer),
-        403: openapi.Response('Staff access required', ErrorResponseSerializer),
-    },
-)
-@api_view(['POST'])
-@parser_classes([MultiPartParser])
-@permission_classes([IsOperationsAdmin])
-def admin_import_fuel_prices(request):
-    """
-    Upload/import fuel price CSV.
-
-    TODO: Implement CSV import logic triggering async import task.
-    """
-    return Response({
-        'imported': 0,
-        'deduplicated': 0,
-        'invalid_rows': 0,
-        'message': 'TODO: Implement CSV import'
-    })
-
-
-@swagger_auto_schema(
-    method='get',
-    operation_summary='Get fuel-price import status',
-    operation_description='Staff-only scaffolded import-job status endpoint.',
-    tags=['Operations'],
-    responses={
-        200: ImportJobSerializer,
-        401: openapi.Response('Authentication required', ErrorResponseSerializer),
-        403: openapi.Response('Staff access required', ErrorResponseSerializer),
-        404: openapi.Response('Import job not found', ErrorResponseSerializer),
-    },
-)
-@api_view(['GET'])
-@permission_classes([IsOperationsAdmin])
-def admin_import_status(request, import_id):
-    """
-    Check status of an import job.
-
-    TODO: Implement import status lookup.
-    """
-    return Response({
-        'import_id': import_id,
-        'status': 'pending',
-        'total_rows': 0,
-        'processed_rows': 0,
-        'failed_rows': 0
-    })
-
-
 @swagger_auto_schema(
     method='post',
     operation_summary='Queue stations for geocoding',
@@ -470,62 +368,3 @@ def admin_geocode_status(request):
             GeocodeJobSerializer(latest_job).data if latest_job else None
         ),
     })
-
-
-# Utility endpoints
-@swagger_auto_schema(
-    method='post',
-    operation_summary='Validate a location',
-    operation_description='Scaffolded endpoint for validating a US location.',
-    tags=['Utilities'],
-    request_body=LocationValidateRequestSerializer,
-    responses={
-        200: LocationValidateResponseSerializer,
-        400: openapi.Response('Invalid request', ErrorResponseSerializer),
-        502: openapi.Response('Upstream geocoding service failure', ErrorResponseSerializer),
-    },
-)
-@api_view(['POST'])
-def location_validate(request):
-    """
-    Validate an address/location.
-
-    TODO: Implement location validation using GeocodingService.
-    """
-    serializer = LocationValidateRequestSerializer(data=request.data)
-    if serializer.is_valid():
-        return Response({
-            'valid': False,
-            'formatted_address': '',
-            'latitude': 0.0,
-            'longitude': 0.0,
-            'country': ''
-        })
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-@swagger_auto_schema(
-    method='post',
-    operation_summary='Estimate fuel cost',
-    operation_description='Scaffolded standalone fuel calculation without routing.',
-    tags=['Utilities'],
-    request_body=FuelEstimateRequestSerializer,
-    responses={
-        200: FuelEstimateResponseSerializer,
-        400: openapi.Response('Invalid request', ErrorResponseSerializer),
-    },
-)
-@api_view(['POST'])
-def fuel_estimate(request):
-    """
-    Simple fuel cost calculation without routing.
-
-    TODO: Implement fuel calculation logic.
-    """
-    serializer = FuelEstimateRequestSerializer(data=request.data)
-    if serializer.is_valid():
-        return Response({
-            'gallons_needed': 0.0,
-            'estimated_cost': 0.0
-        })
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

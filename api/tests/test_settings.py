@@ -11,7 +11,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 class EnvironmentSettingsTests(SimpleTestCase):
-    def run_settings_probe(self, environment, expression):
+    def run_settings_probe(self, environment, expression, *, load_environment_file=True):
         process_environment = os.environ.copy()
         for key in (
             "SECRET_KEY",
@@ -20,19 +20,26 @@ class EnvironmentSettingsTests(SimpleTestCase):
             "CORS_ALLOW_ALL_ORIGINS",
             "CORS_ALLOWED_ORIGINS",
             "SUPPORTED_COUNTRY_CODES",
+            "NOMINATIM_USER_AGENT",
             "NOMINATIM_TIMEOUT_SECONDS",
             "GEOCODING_STALE_AFTER_SECONDS",
             "GEOCODING_POLL_SECONDS",
+            "FUEL_ROUTE_CORRIDOR_MILES",
             "SQLITE_PATH",
         ):
             process_environment.pop(key, None)
         process_environment.update(environment)
+        dotenv_setup = (
+            ""
+            if load_environment_file
+            else "import dotenv; dotenv.load_dotenv = lambda *args, **kwargs: False; "
+        )
         completed = subprocess.run(
             [
                 sys.executable,
                 "-c",
                 (
-                    "import json; "
+                    f"import json; {dotenv_setup}"
                     "import fuelSpotter.settings as settings; "
                     f"print(json.dumps({expression}))"
                 ),
@@ -45,6 +52,15 @@ class EnvironmentSettingsTests(SimpleTestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout.strip())
+
+    def test_default_nominatim_user_agent_contains_contact_email(self):
+        user_agent = self.run_settings_probe(
+            {"SECRET_KEY": "test-key"},
+            "settings.NOMINATIM_USER_AGENT",
+            load_environment_file=False,
+        )
+
+        self.assertIn("opeyemi655@gmail.com", user_agent)
 
     def test_security_settings_are_loaded_from_environment(self):
         values = self.run_settings_probe(
@@ -121,6 +137,48 @@ class EnvironmentSettingsTests(SimpleTestCase):
 
         self.assertEqual(values["max_range_miles"], 500)
         self.assertEqual(values["mpg"], 10)
+
+    def test_fuel_route_corridor_defaults_to_five_miles(self):
+        value = self.run_settings_probe(
+            {"SECRET_KEY": "test-key"},
+            "settings.FUEL_ROUTE_CORRIDOR_MILES",
+            load_environment_file=False,
+        )
+
+        self.assertEqual(value, 5.0)
+
+    def test_fuel_route_corridor_is_loaded_from_environment(self):
+        value = self.run_settings_probe(
+            {"SECRET_KEY": "test-key", "FUEL_ROUTE_CORRIDOR_MILES": "7.5"},
+            "settings.FUEL_ROUTE_CORRIDOR_MILES",
+        )
+
+        self.assertEqual(value, 7.5)
+
+    def test_fuel_route_corridor_must_be_finite_and_positive(self):
+        for invalid_value in ("0", "-1", "nan", "inf"):
+            with self.subTest(invalid_value=invalid_value):
+                process_environment = os.environ.copy()
+                process_environment.update(
+                    {
+                        "SECRET_KEY": "test-key",
+                        "FUEL_ROUTE_CORRIDOR_MILES": invalid_value,
+                    }
+                )
+                completed = subprocess.run(
+                    [sys.executable, "-c", "import fuelSpotter.settings"],
+                    cwd=REPOSITORY_ROOT,
+                    env=process_environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "FUEL_ROUTE_CORRIDOR_MILES must be positive and finite",
+                    completed.stderr,
+                )
 
     def test_sqlite_path_is_loaded_from_environment(self):
         values = self.run_settings_probe(

@@ -33,11 +33,19 @@ class StationMatchingServiceTests(TestCase):
         )
         self.create_station("2", status="pending")
         self.create_station("3", status="failed")
+        self.create_station("5", status="claimed")
+        self.create_station("6", status="processing")
         self.create_station(
             "4",
             status="success",
             latitude=Decimal("32.7767000"),
             longitude=None,
+        )
+        self.create_station(
+            "7",
+            status="success",
+            latitude=None,
+            longitude=Decimal("-96.7970000"),
         )
 
         station_ids = list(

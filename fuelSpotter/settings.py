@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+import math
 import os
 
 from django.core.exceptions import ImproperlyConfigured
@@ -213,7 +214,7 @@ NOMINATIM_BASE_URL = os.environ.get(
 EXTERNAL_HTTP_TIMEOUT_SECONDS = float(os.environ.get('EXTERNAL_HTTP_TIMEOUT_SECONDS', '10'))
 NOMINATIM_USER_AGENT = os.environ.get(
     'NOMINATIM_USER_AGENT',
-    'FuelSpotter/1.0 (development@example.invalid)',
+    'FuelSpotter/1.0 (contact: opeyemi655@gmail.com)',
 )
 NOMINATIM_MIN_INTERVAL_SECONDS = float(
     os.environ.get('NOMINATIM_MIN_INTERVAL_SECONDS', '1')
@@ -226,6 +227,13 @@ GEOCODING_STALE_AFTER_SECONDS = float(
 )
 GEOCODING_POLL_SECONDS = float(os.environ.get('GEOCODING_POLL_SECONDS', '5'))
 GEOCODING_MAX_RETRIES = int(os.environ.get('GEOCODING_MAX_RETRIES', '5'))
+FUEL_ROUTE_CORRIDOR_MILES = float(
+    os.environ.get('FUEL_ROUTE_CORRIDOR_MILES', '5')
+)
+if not math.isfinite(FUEL_ROUTE_CORRIDOR_MILES) or FUEL_ROUTE_CORRIDOR_MILES <= 0:
+    raise ImproperlyConfigured(
+        'FUEL_ROUTE_CORRIDOR_MILES must be positive and finite'
+    )
 GEOCODING_AUTO_QUEUE_BATCH_SIZE = int(
     os.environ.get('GEOCODING_AUTO_QUEUE_BATCH_SIZE', '500')
 )

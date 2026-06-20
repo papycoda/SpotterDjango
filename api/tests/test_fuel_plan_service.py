@@ -2,7 +2,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from api import services
 from api.services.fuel_plan_service import FuelPlanService
@@ -12,6 +12,7 @@ class FuelPlanServiceContractTests(SimpleTestCase):
     def test_service_is_exported_from_service_layer(self):
         self.assertTrue(hasattr(services, "FuelPlanService"))
 
+    @override_settings(FUEL_ROUTE_CORRIDOR_MILES=5)
     def test_orchestrates_route_filtering_and_optimization(self):
         route_plan = SimpleNamespace(
             route_geometry=[
@@ -43,7 +44,7 @@ class FuelPlanServiceContractTests(SimpleTestCase):
         route_service.plan_route.assert_called_once_with("Dallas, TX", "Denver, CO")
         filtering_service.find_nearby_stations.assert_called_once_with(
             route_geometry=route_plan.route_geometry,
-            max_distance_m=1000,
+            max_distance_m=8046.72,
         )
         optimization_route, optimization_stations = (
             optimization_service.optimize_fuel_stops.call_args.args

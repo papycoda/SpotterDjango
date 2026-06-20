@@ -42,7 +42,7 @@ class OpenApiSchemaTests(TestCase):
         self.assertEqual(stop_properties['gallons_purchased']['type'], 'string')
         self.assertEqual(stop_properties['cost_usd']['type'], 'string')
 
-    def test_schema_documents_station_filters_and_csv_upload(self):
+    def test_schema_documents_station_filters_and_excludes_unsupported_paths(self):
         response = self.client.get(
             '/api/v1/schema/',
             HTTP_HOST='localhost',
@@ -53,11 +53,25 @@ class OpenApiSchemaTests(TestCase):
         schema = json.loads(response.content)
         station_list = schema['paths']['/fuel-stations/']['get']
         query_names = {parameter['name'] for parameter in station_list['parameters']}
-        csv_import = schema['paths']['/admin/fuel-prices/import/']['post']
 
         self.assertEqual(
             query_names,
             {'state', 'min_price', 'max_price', 'page', 'page_size'},
         )
-        self.assertEqual(csv_import['consumes'], ['multipart/form-data'])
-        self.assertEqual(csv_import['parameters'][0]['type'], 'file')
+        unsupported_paths = {
+            '/fuel-stations/near-route/',
+            '/admin/fuel-prices/import/',
+            '/admin/fuel-prices/imports/{import_id}/',
+            '/locations/validate/',
+            '/fuel/estimate/',
+        }
+        self.assertTrue(unsupported_paths.isdisjoint(schema['paths']))
+        self.assertTrue({
+            '/health/',
+            '/routes/preview/',
+            '/routes/fuel-plan/',
+            '/fuel-stations/',
+            '/fuel-stations/{station_id}/',
+            '/admin/fuel-stations/geocode/',
+            '/admin/fuel-stations/geocode/status/',
+        }.issubset(schema['paths']))

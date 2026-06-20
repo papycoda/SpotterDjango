@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, re_path
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 from rest_framework import permissions
@@ -34,16 +34,13 @@ urlpatterns = [
 
     # Fuel stations
     path('fuel-stations/', views.fuel_stations_list, name='fuel-stations-list'),
-    path('fuel-stations/near-route/', views.fuel_stations_near_route, name='fuel-stations-near-route'),
-    path('fuel-stations/<str:station_id>/', views.fuel_station_detail, name='fuel-station-detail'),
+    re_path(
+        r'^fuel-stations/(?P<station_id>(?!near-route/$)[^/]+)/$',
+        views.fuel_station_detail,
+        name='fuel-station-detail',
+    ),
 
     # Admin/operations
-    path('admin/fuel-prices/import/', views.admin_import_fuel_prices, name='admin-import-fuel-prices'),
-    path('admin/fuel-prices/imports/<str:import_id>/', views.admin_import_status, name='admin-import-status'),
     path('admin/fuel-stations/geocode/', views.admin_geocode_stations, name='admin-geocode-stations'),
     path('admin/fuel-stations/geocode/status/', views.admin_geocode_status, name='admin-geocode-status'),
-
-    # Utilities
-    path('locations/validate/', views.location_validate, name='location-validate'),
-    path('fuel/estimate/', views.fuel_estimate, name='fuel-estimate'),
 ]

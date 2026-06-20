@@ -30,7 +30,13 @@ python manage.py run_geocoding_worker --watch --auto-queue 500
 
 Station geocoding never runs inside an HTTP request or route-planning operation. The worker uses persisted jobs, station claims, heartbeats, stale-work recovery, and a shared database rate limiter. It processes calls sequentially to respect Nominatim limits.
 
-The complete dataset can take roughly two hours at one request per second. Configure a real identifying `NOMINATIM_USER_AGENT` in `.env`. Failed rows are not retried automatically because repeated requests for an unresolvable highway-style address waste the public service quota. Retry them explicitly through the staff geocoding endpoint after improving their source data.
+The complete dataset can take roughly two hours at one request per second. Configure the identifying user agent in `.env`:
+
+```dotenv
+NOMINATIM_USER_AGENT=FuelSpotter/1.0 (contact: opeyemi655@gmail.com)
+```
+
+Failed rows are not retried automatically because repeated requests for an unresolvable highway-style address waste the public service quota. Retry them explicitly through the staff geocoding endpoint after improving their source data.
 
 Latitude and longitude remain null while a station is pending and when no reliable station match exists. Route matching uses only `success` stations with both coordinates populated.
 

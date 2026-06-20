@@ -6,6 +6,7 @@ bounding box prefiltering and Shapely geometric operations.
 """
 
 from decimal import Decimal
+import math
 from unittest.mock import Mock, patch
 
 from django.test import TestCase
@@ -179,6 +180,59 @@ class StationFilteringServiceTests(TestCase):
         # End progress should be greater than start progress
         self.assertGreater(progress_end, progress_start)
 
+    def test_multi_state_route_uses_geodesic_distance_and_progress(self):
+        route = [
+            (Decimal("32.7767"), Decimal("-96.7970")),
+            (Decimal("35.4676"), Decimal("-97.5164")),
+            (Decimal("39.7392"), Decimal("-104.9903")),
+        ]
+
+        def independent_haversine(start, end):
+            lat1, lon1 = map(math.radians, map(float, start))
+            lat2, lon2 = map(math.radians, map(float, end))
+            dlat, dlon = lat2 - lat1, lon2 - lon1
+            a = (
+                math.sin(dlat / 2) ** 2
+                + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+            )
+            return 6_371_008.8 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        expected_first_leg = independent_haversine(route[0], route[1])
+        expected_total = expected_first_leg + independent_haversine(route[1], route[2])
+
+        total = self.service.get_route_total_distance(route)
+        distance, progress = self.service.calculate_station_route_distance(
+            route[1][0], route[1][1], route
+        )
+
+        self.assertAlmostEqual(total, expected_total, delta=expected_total * 0.001)
+        self.assertLess(distance, 1)
+        self.assertAlmostEqual(progress, expected_first_leg, delta=expected_first_leg * 0.001)
+
+    def test_five_mile_corridor_includes_inside_and_excludes_outside(self):
+        route = [
+            (Decimal("32.0"), Decimal("-97.0")),
+            (Decimal("34.0"), Decimal("-97.0")),
+        ]
+        for station_id, longitude in (("inside-five", "-96.92"), ("outside-five", "-96.90")):
+            FuelStation.objects.create(
+                id=station_id,
+                name=station_id,
+                address="1 Corridor Rd",
+                city="Test",
+                state="TX",
+                price_per_gallon=Decimal("3.50"),
+                latitude=Decimal("33.0"),
+                longitude=Decimal(longitude),
+                geocoding_status="success",
+            )
+
+        nearby = self.service.find_nearby_stations(route, max_distance_m=5 * 1609.344)
+
+        station_ids = {item.station.id for item in nearby}
+        self.assertIn("inside-five", station_ids)
+        self.assertNotIn("outside-five", station_ids)
+
     def test_calculate_station_route_distance_small_route(self):
         """Test distance calculation with minimal route."""
         small_route = [
@@ -341,12 +395,14 @@ class StationFilteringPerformanceTests(TestCase):
         """Create test stations distributed across Texas."""
         import random
 
+        generator = random.Random(0)
+
         for i in range(count):
             # Random coordinates within Texas bounds
-            lat = Decimal(str(random.uniform(25.0, 36.5))).quantize(
+            lat = Decimal(str(generator.uniform(25.0, 36.5))).quantize(
                 Decimal("0.0000001")
             )
-            lon = Decimal(str(random.uniform(-106.0, -93.0))).quantize(
+            lon = Decimal(str(generator.uniform(-106.0, -93.0))).quantize(
                 Decimal("0.0000001")
             )
 
