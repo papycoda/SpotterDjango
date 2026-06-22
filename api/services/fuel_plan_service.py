@@ -6,6 +6,7 @@ from api.services.fuel_optimization_service import FuelOptimizationService, Fuel
 from api.services.route_service import RoutePlan, RouteService
 from api.services.routing_service import RouteGeometry
 from api.services.station_filtering_service import StationFilteringService
+from api.utils.geometry_utils import simplify_for_station_filtering
 
 
 @dataclass(frozen=True)
@@ -30,8 +31,16 @@ class FuelPlanService:
 
     def create_plan(self, start: str, finish: str) -> FuelPlanResult:
         route_plan = self.route_service.plan_route(start, finish)
+
+        # Simplify geometry for station filtering (reduces 9000+ points to ~300)
+        # Full geometry is preserved for the response
+        simplified_geometry = simplify_for_station_filtering(
+            route_plan.route_geometry,
+            target_point_count=300
+        )
+
         nearby_stations = self.filtering_service.find_nearby_stations(
-            route_geometry=route_plan.route_geometry,
+            route_geometry=simplified_geometry,
             max_distance_m=settings.FUEL_ROUTE_CORRIDOR_MILES * 1609.344,
         )
         route_geometry = RouteGeometry(

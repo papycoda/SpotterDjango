@@ -130,12 +130,21 @@ class FuelOptimizationServiceTests(SimpleTestCase):
         class CountingList(list):
             def __init__(self, values):
                 super().__init__(values)
-                self.items_read = 0
+                self.iteration_reads = 0
+                self.indexed_reads = 0
 
             def __iter__(self):
                 for item in super().__iter__():
-                    self.items_read += 1
+                    self.iteration_reads += 1
                     yield item
+
+            def __getitem__(self, key):
+                self.indexed_reads += 1
+                return super().__getitem__(key)
+
+            @property
+            def items_read(self):
+                return self.iteration_reads + self.indexed_reads
 
         class InstrumentedService(FuelOptimizationService):
             normalized = None
@@ -164,6 +173,13 @@ class FuelOptimizationServiceTests(SimpleTestCase):
         result = service.optimize_fuel_stops(route_geometry, stations)
 
         self.assertEqual(len(result.fuel_stops), station_count)
+        # The algorithm uses monotonic indexes: each station is read a constant
+        # number of times during the greedy scan. This gives O(n) total.
+        # iteration_reads: gap validation (n) = n
+        # indexed_reads: initial call (2) + n-1 iterations (3 each) = 3n - 1
+        # Total: 4n - 1 which is O(n) linear behavior.
+        self.assertEqual(service.normalized.iteration_reads, station_count)  # gap validation
+        self.assertLessEqual(service.normalized.indexed_reads, station_count * 3)
         self.assertLessEqual(service.normalized.items_read, station_count * 4)
 
     def test_prefer_cheaper_downstream_station(self):

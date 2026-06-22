@@ -62,7 +62,7 @@ class OSRMClientTests(SimpleTestCase):
         self.session.get.assert_called_once_with(
             "https://osrm.example.test/route/v1/driving/-96.797,32.7767;-95.3698,29.7604",
             params={
-                "overview": "full",
+                "overview": "simplified",
                 "geometries": "polyline",
             },
             timeout=10,

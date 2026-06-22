@@ -5,7 +5,7 @@ Provides route planning and geometry calculations between coordinates.
 """
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import requests
 from django.conf import settings
@@ -63,7 +63,7 @@ class OSRMClient:
             response = self.session.get(
                 f"{self.base_url}/route/v1/driving/{coord_string}",
                 params={
-                    "overview": "full",  # Return full geometry
+                    "overview": "simplified",  # Return simplified geometry (faster)
                     "geometries": "polyline",  # Use encoded polyline
                 },
                 timeout=settings.EXTERNAL_HTTP_TIMEOUT_SECONDS,
@@ -164,16 +164,18 @@ class OSRMClient:
             lon += lon_change
 
             # Convert to degrees and store as (lat, lon) with Decimal precision
+            # Polyline encoding uses 1e5 precision (5 decimal places = ~1.1m accuracy)
+            # Avoid float conversion for large accumulated values
             try:
-                lat_decimal = (Decimal(lat) / Decimal("10000000")).quantize(
-                    Decimal("0.0000001")
-                )
-                lon_decimal = (Decimal(lon) / Decimal("10000000")).quantize(
-                    Decimal("0.0000001")
-                )
+                # Direct Decimal division with proper scaling
+                lat_decimal = Decimal(lat) / Decimal("100000")
+                lon_decimal = Decimal(lon) / Decimal("100000")
+                # Round to 7 decimal places for final precision
+                lat_decimal = lat_decimal.quantize(Decimal("0.0000001"), rounding=ROUND_HALF_UP)
+                lon_decimal = lon_decimal.quantize(Decimal("0.0000001"), rounding=ROUND_HALF_UP)
                 coordinates.append((lat_decimal, lon_decimal))
             except (InvalidOperation, TypeError) as exc:
-                raise ValueError("Invalid coordinate value in polyline") from exc
+                raise ValueError(f"Invalid coordinate value in polyline: lat={lat}, lon={lon}") from exc
 
         return coordinates
 
@@ -186,21 +188,24 @@ class OSRMClient:
         """
         result = 0
         shift = 0
-        byte = None
 
-        while byte != 0:
+        while True:
             if index >= len(encoded):
                 raise ValueError("Unexpected end of encoded string")
 
             byte = ord(encoded[index]) - 63
             index += 1
 
-            # Check if continuation bit is set
+            # Check if continuation bit is set (bit 5)
             continuation = (byte & 0x20) != 0
             byte &= 0x1F  # Remove continuation bit
 
             result |= (byte << shift)
             shift += 5
+
+            # If no continuation bit, we're done with this value
+            if not continuation:
+                break
 
         # Handle sign bit and two's complement
         if result & 1:
