@@ -61,7 +61,7 @@ Each fuel-plan request has a fixed external-call budget:
 - one OSRM call that returns the complete route, distance, duration, and geometry (cached after first request);
 - zero external calls for station lookup or fuel optimization.
 
-Therefore a first request makes exactly three external HTTP calls. Repeated requests for the same locations use DB-backed caches and make zero external calls. Fuel stations are matched and optimized from the local database. Station geocoding is an offline worker workflow and never runs during an API request.
+Therefore a first request makes exactly three external HTTP calls. Within a single request, repeated location strings use in-memory caching to avoid duplicate calls. Fuel stations are matched and optimized from the local database. Station geocoding is an offline worker workflow and never runs during an API request.
 
 Response time is normally dominated by the two geocoding calls and the single routing call on first request. All external calls have bounded timeouts; local station filtering first applies a database bounding box and then evaluates only corridor candidates within 5 miles of the route.
 
@@ -72,6 +72,45 @@ python manage.py test api.tests.test_station_filtering.StationFilteringPerforman
 python manage.py test api.tests.test_route_fuel_plan
 ```
 
+### Cities available for endpoint geocoding
+
+The local city-coordinate dataset includes these U.S. cities. You can use the city/state combinations below to test start and finish geocoding without depending on broader Nominatim lookups:
+
+| City | State | Latitude | Longitude |
+| --- | --- | ---: | ---: |
+| New York | NY | 40.7128 | -74.0060 |
+| Los Angeles | CA | 34.0522 | -118.2437 |
+| Chicago | IL | 41.8781 | -87.6298 |
+| Houston | TX | 29.7604 | -95.3698 |
+| Phoenix | AZ | 33.4484 | -112.0740 |
+| Philadelphia | PA | 39.9526 | -75.1652 |
+| San Antonio | TX | 29.4241 | -98.4936 |
+| San Diego | CA | 32.7157 | -117.1611 |
+| Dallas | TX | 32.7767 | -96.7970 |
+| San Jose | CA | 37.3382 | -121.8863 |
+| Austin | TX | 30.2672 | -97.7431 |
+| Jacksonville | FL | 30.3322 | -81.6557 |
+| Fort Worth | TX | 32.7555 | -97.3308 |
+| Columbus | OH | 39.9612 | -82.9988 |
+| Indianapolis | IN | 39.7684 | -86.1581 |
+| Charlotte | NC | 35.2271 | -80.8431 |
+| Seattle | WA | 47.6062 | -122.3321 |
+| Denver | CO | 39.7392 | -104.9903 |
+| Washington | DC | 38.9072 | -77.0369 |
+| Boston | MA | 42.3601 | -71.0589 |
+| El Paso | TX | 31.7619 | -106.4850 |
+| Nashville | TN | 36.1627 | -86.7816 |
+| Oklahoma City | OK | 35.4676 | -97.5164 |
+| Portland | OR | 45.5152 | -122.6784 |
+| Las Vegas | NV | 36.1699 | -115.1398 |
+| Louisville | KY | 38.2527 | -85.7585 |
+| Memphis | TN | 35.1495 | -90.0490 |
+| Detroit | MI | 42.3314 | -83.0458 |
+| Baltimore | MD | 39.2904 | -76.6122 |
+| Atlanta | GA | 33.7490 | -84.3880 |
+
+Fuel-plan feasibility still depends on the locally persisted `success` fuel-station coordinates. For example, `Nashville, TN` to `San Jose, CA` can geocode both endpoints, but the current local station dataset has no success stations in the final California leg, so that route can still return a 422 route-gap error.
+
 ## Local setup
 
 ```powershell
@@ -79,6 +118,12 @@ python -m pip install -r requirements.txt
 python manage.py migrate
 python manage.py import_fuel_prices fuel-prices-for-be-assessment.csv
 python manage.py run_app
+```
+
+For optional Celery/Redis support (distributed task processing), also install:
+
+```powershell
+python -m pip install -r requirements-optional.txt
 ```
 
 `run_app` starts the Django development server and the database-backed geocoding worker as separate child processes. The worker automatically creates bounded jobs for pending stations and continues processing them in the background. Press `Ctrl+C` once to stop both processes.
@@ -101,6 +146,15 @@ python manage.py run_geocoding_worker --watch --auto-queue 500
 Station geocoding never runs inside an HTTP request or route-planning operation. The worker uses persisted jobs, station claims, heartbeats, stale-work recovery, and a shared database rate limiter. It processes calls sequentially to respect Nominatim limits.
 
 Geocoding results are cached in the database. Once a location or station has been successfully geocoded, the app reuses the cached coordinates and does not call Nominatim again for the same normalized input.
+
+### Approximate demo mode (city centroids)
+
+When exact station geocoding fails, the system can fall back to city centroid coordinates for approximate routing. Stations using city centroids are marked with:
+
+- `coordinate_source: "city_centroid"` - Indicates coordinates are approximate city-level locations
+- `coordinate_quality: "approximate"` - Lower quality than exact station locations
+
+This approximate mode allows fuel planning to work for demo/assessment purposes even when precise station locations cannot be determined. Route calculations using city centroids will have reduced accuracy for station positioning and fuel stop timing.
 
 The complete dataset can take roughly two hours at one request per second. Configure the identifying user agent in `.env`:
 
@@ -191,6 +245,17 @@ Convenience wrapper to start both web server and geocoding worker:
 python manage.py run_app
 ```
 
+### `geocoding_report`
+
+Generate geocoding status report for fuel stations:
+
+```powershell
+python manage.py geocoding_report
+```
+
+Options:
+- `--strict`: Exit with non-zero code if failure conditions are detected
+
 ## API endpoints
 
 ### Public endpoints
@@ -205,7 +270,6 @@ python manage.py run_app
 
 - `GET /api/v1/admin/fuel-stations/geocode/status/` — View geocoding progress
 - `POST /api/v1/admin/fuel-stations/geocode/` — Queue stations for geocoding
-- `GET /api/v1/admin/fuel-stations/geocoding/report/` — Generate geocoding report
 
 ### Documentation
 

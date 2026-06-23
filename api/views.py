@@ -283,8 +283,6 @@ def fuel_stations_list(request):
 def fuel_station_detail(request, station_id):
     """
     Get details for a specific fuel station.
-
-    TODO: Implement station lookup logic.
     """
     try:
         station = FuelStation.objects.get(id=station_id)

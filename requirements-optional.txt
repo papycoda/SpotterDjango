@@ -1,0 +1,7 @@
+# Optional dependencies for Celery-based task queue
+# The default implementation uses management-command workers
+# Install these only if you want to use Celery for distributed task processing
+
+# Celery for async tasks (optional - management-command worker is default)
+celery==5.6.3
+redis==8.0.0
