@@ -116,9 +116,10 @@ def route_preview(request):
     operation_description=(
         'Primary assignment endpoint. Start and finish must be within the USA. '
         'The vehicle assumptions are fixed server-side at 500 miles maximum '
-        'range, 10 MPG, and an initial full 50-gallon tank. The completed '
-        'operation will return GeoJSON route geometry, selected fuel stops, '
-        'total fuel purchased, and total en-route fuel cost.'
+        'range, 10 MPG, and an initial full 50-gallon tank. Returns '
+        'selected fuel stops, total fuel purchased, and total en-route fuel cost. '
+        'Route geometry is omitted by default; set include_geometry=true to '
+        'include GeoJSON LineString coordinates.'
     ),
     tags=['Routes'],
     request_body=FuelPlanRequestSerializer,
@@ -153,21 +154,24 @@ def route_fuel_plan(request):
 
     start = serializer.validated_data['start']
     finish = serializer.validated_data['finish']
+    include_geometry = serializer.validated_data.get('include_geometry', False)
 
     try:
         result = FuelPlanService().create_plan(start, finish)
         route_plan = result.route_plan
         fuel_plan = result.fuel_plan
 
-        # Step 5: Convert route geometry to GeoJSON format
-        # GeoJSON LineString: {"type": "LineString", "coordinates": [[lon, lat], ...]}
-        geojson_geometry = {
-            "type": "LineString",
-            "coordinates": [
-                [float(lon), float(lat)]
-                for lat, lon in route_plan.route_geometry
-            ]
-        }
+        # Step 5: Convert route geometry to GeoJSON format (if requested)
+        geojson_geometry = None
+        if include_geometry:
+            # GeoJSON LineString: {"type": "LineString", "coordinates": [[lon, lat], ...]}
+            geojson_geometry = {
+                "type": "LineString",
+                "coordinates": [
+                    [float(lon), float(lat)]
+                    for lat, lon in route_plan.route_geometry
+                ]
+            }
 
         # Step 6: Format fuel stops for response
         fuel_stops = []
@@ -190,14 +194,17 @@ def route_fuel_plan(request):
             'finish': route_plan.end_geocoded.display_name,
             'distance_miles': float(route_plan.total_distance_miles),
             'duration_minutes': int(float(route_plan.total_duration_minutes)),
-            'route_geometry': geojson_geometry,
             'fuel_stops': fuel_stops,
             'total_fuel_purchased': format(fuel_plan.total_fuel_purchased, '.3f'),
             'total_fuel_cost': format(fuel_plan.total_cost_usd, '.2f'),
             'vehicle_assumptions': fuel_plan.vehicle_assumptions,
         }
 
-        return Response(FuelPlanResponseSerializer(response_data).data)
+        # Only include route_geometry if requested
+        if include_geometry:
+            response_data['route_geometry'] = geojson_geometry
+
+        return Response(response_data)
 
     except LocationNotInUSAError as exc:
         return Response(

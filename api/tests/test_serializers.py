@@ -36,7 +36,7 @@ class FuelPlanRequestSerializerTests(SimpleTestCase):
         self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertEqual(
             serializer.validated_data,
-            {"start": "Chicago, IL", "finish": "Dallas, TX"},
+            {"start": "Chicago, IL", "finish": "Dallas, TX", "include_geometry": False},
         )
 
     def test_rejects_blank_start(self):

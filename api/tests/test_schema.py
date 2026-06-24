@@ -19,7 +19,7 @@ class OpenApiSchemaTests(TestCase):
             'properties'
         ]
 
-        self.assertEqual(set(properties), {'start', 'finish'})
+        self.assertEqual(set(properties), {'start', 'finish', 'include_geometry'})
         self.assertEqual(set(fuel_plan['responses']), {'200', '400', '404', '422', '502'})
         self.assertIn('500 miles', fuel_plan['description'])
         self.assertNotIn('scaffolded', fuel_plan['description'].lower())

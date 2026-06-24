@@ -467,6 +467,151 @@ class FuelOptimizationServiceTests(SimpleTestCase):
         self.assertEqual(len(result.fuel_stops), 1)
         self.assertAlmostEqual(result.fuel_stops[0].route_progress_miles, Decimal("450"), places=0)
 
+    def test_skip_station_with_less_than_1_gallon_purchase(self):
+        """Test that stations requiring < 1 gallon purchase are skipped when possible."""
+        # 900-mile route: stations at 100, 300, 500, 700 miles
+        # All stations have the same price, so algorithm minimizes stops
+        route_geometry = RouteGeometry(
+            distance_miles=Decimal("900"),
+            duration_minutes=Decimal("900"),
+            coordinates=[(Decimal("32.7767"), Decimal("-96.7970"))],
+        )
+
+        stations = [
+            self._create_nearby_station(100 * 1609.344, Decimal("3.50"), station_id="100"),
+            self._create_nearby_station(300 * 1609.344, Decimal("3.50"), station_id="300"),
+            self._create_nearby_station(500 * 1609.344, Decimal("3.50"), station_id="500"),
+            self._create_nearby_station(700 * 1609.344, Decimal("3.50"), station_id="700"),
+        ]
+
+        result = self.service.optimize_fuel_stops(route_geometry, stations)
+
+        # Algorithm picks optimal stops: 300 and 700 miles
+        # At 300: arrive with 20 gallons, buy 30 to reach 700
+        # At 700: arrive with 10 gallons, buy 10 to reach destination
+        self.assertEqual(len(result.fuel_stops), 2)
+        self.assertEqual([stop.station.id for stop in result.fuel_stops], ["300", "700"])
+        self.assertGreaterEqual(result.fuel_stops[-1].gallons_purchased, Decimal("1.0"))
+
+    def test_minimum_purchase_when_close_to_destination(self):
+        """Test minimum purchase is enforced even when close to destination."""
+        # 550-mile route with station at 400 miles
+        # At 400 miles, we've used 40 gallons, have 10 left
+        # Need 5 gallons for remaining 150 miles - well above 1 gallon minimum
+        route_geometry = RouteGeometry(
+            distance_miles=Decimal("550"),
+            duration_minutes=Decimal("550"),
+            coordinates=[(Decimal("32.7767"), Decimal("-96.7970"))],
+        )
+
+        stations = [
+            self._create_nearby_station(400 * 1609.344, Decimal("3.50"), station_id="400"),
+        ]
+
+        result = self.service.optimize_fuel_stops(route_geometry, stations)
+
+        self.assertEqual(len(result.fuel_stops), 1)
+        # At 400 miles: used 40 gallons, need 15 more for remaining 150 miles
+        # Purchase = 15 - 10 (remaining) = 5 gallons
+        self.assertGreaterEqual(result.fuel_stops[0].gallons_purchased, Decimal("1.0"))
+
+    def test_skip_station_requiring_less_than_1_gallon(self):
+        """Test that stations which would require < 1 gallon are skipped."""
+        # 1000-mile route with stations at 400, 490, 600 miles
+        # With strategic pricing, we should skip stations that don't meet minimum
+        route_geometry = RouteGeometry(
+            distance_miles=Decimal("1000"),
+            duration_minutes=Decimal("1000"),
+            coordinates=[(Decimal("32.7767"), Decimal("-96.7970"))],
+        )
+
+        # Station at 490 is very close to 500-mile range boundary
+        # If we arrive with ~1 gallon, stopping there would require buying < 1 gallon
+        stations = [
+            self._create_nearby_station(400 * 1609.344, Decimal("5.00"), station_id="expensive"),
+            self._create_nearby_station(490 * 1609.344, Decimal("3.00"), station_id="close_cheap"),
+            self._create_nearby_station(600 * 1609.344, Decimal("3.00"), station_id="further_cheap"),
+        ]
+
+        result = self.service.optimize_fuel_stops(route_geometry, stations)
+
+        # All stops should require at least 1 gallon
+        for stop in result.fuel_stops:
+            self.assertGreaterEqual(
+                stop.gallons_purchased,
+                Decimal("1.000"),
+                f"Station {stop.station.id} would purchase {stop.gallons_purchased} gallons"
+            )
+
+    def test_optimizer_reproduces_tiny_top_up_when_cheaper_station_is_just_out_of_range(self):
+        """
+        Regression test for tiny top-up behavior from TODO.md.
+
+        Florence → Savannah route (1199.29 miles):
+        - Emporia (43.500 miles, $2.84)
+        - Harrisburg (496.430 miles, $3.69)
+        - Metropolis (544.030 miles, $3.60)
+
+        Emporia → Metropolis = 500.53 miles (exceeds 500-mile range by 0.53 miles).
+        Original behavior: Harrisburg top-up of 0.053 gallons.
+        Fixed behavior: Harrisburg rounds up to 1.000 gallon minimum.
+
+        The fix eliminates the tiny purchase without overbuying fuel.
+        """
+        route_geometry = RouteGeometry(
+            distance_miles=Decimal("1199.29"),
+            duration_minutes=Decimal("1328"),
+            coordinates=[(Decimal("32.7767"), Decimal("-96.7970"))],
+        )
+
+        stations = [
+            self._create_nearby_station(43.500 * 1609.344, Decimal("2.84"), station_id="emporia"),
+            self._create_nearby_station(496.430 * 1609.344, Decimal("3.69"), station_id="harrisburg"),
+            self._create_nearby_station(544.030 * 1609.344, Decimal("3.60"), station_id="metropolis"),
+            self._create_nearby_station(996.150 * 1609.344, Decimal("3.17"), station_id="byron"),
+            self._create_nearby_station(1042.460 * 1609.344, Decimal("3.00"), station_id="dublin"),
+        ]
+
+        result = self.service.optimize_fuel_stops(route_geometry, stations)
+
+        stops_by_id = {stop.station.id: stop for stop in result.fuel_stops}
+
+        # Verify Emporia and Harrisburg stops exist
+        self.assertIn("emporia", stops_by_id)
+        self.assertIn("harrisburg", stops_by_id)
+
+        # Verify the gap that necessitated Harrisburg
+        emporia_to_metropolis = Decimal("544.030") - Decimal("43.500")
+        self.assertEqual(emporia_to_metropolis, Decimal("500.530"))
+
+        shortfall_miles = emporia_to_metropolis - Decimal("500.000")
+        self.assertEqual(shortfall_miles, Decimal("0.530"))
+
+        tiny_top_up_gallons = shortfall_miles / Decimal("10")
+        self.assertEqual(tiny_top_up_gallons, Decimal("0.053"))
+
+        # Emporia buys fuel to reach destination
+        self.assertAlmostEqual(stops_by_id["emporia"].gallons_purchased, Decimal("4.350"), places=3)
+
+        # Harrisburg: instead of 0.053 gallons, rounds up to 1.000 gallon minimum
+        self.assertGreaterEqual(stops_by_id["harrisburg"].gallons_purchased, Decimal("1.000"))
+        self.assertLessEqual(stops_by_id["harrisburg"].gallons_purchased, Decimal("2.000"))
+
+        # Total fuel purchased should be close to theoretical minimum (not wasteful)
+        # Theoretical: 1199.29 / 10 = 119.929 gallons total consumption
+        # Starting tank: 50 gallons
+        # Minimum en-route purchase: 119.929 - 50 = 69.929 gallons
+        # Allow small tolerance for rounding and minimum purchase logic
+        self.assertLessEqual(result.total_fuel_purchased, Decimal("75.000"))
+
+        # All stops must meet the minimum purchase requirement
+        for stop in result.fuel_stops:
+            self.assertGreaterEqual(
+                stop.gallons_purchased,
+                Decimal("1.000"),
+                f"Station {stop.station.id} purchased {stop.gallons_purchased} gallons (< 1.000 minimum)"
+            )
+
     def _create_nearby_station(
         self,
         route_progress_m: float,

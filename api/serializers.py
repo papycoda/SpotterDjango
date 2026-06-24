@@ -122,6 +122,7 @@ class RoutePreviewResponseSerializer(serializers.Serializer):
 class FuelPlanRequestSerializer(serializers.Serializer):
     start = serializers.CharField()
     finish = serializers.CharField()
+    include_geometry = serializers.BooleanField(default=False)
 
 
 class GeoJSONLineStringSerializer(serializers.Serializer):
@@ -159,7 +160,7 @@ class FuelPlanResponseSerializer(serializers.Serializer):
     finish = serializers.CharField()
     distance_miles = serializers.FloatField()
     duration_minutes = serializers.IntegerField(min_value=0)
-    route_geometry = GeoJSONLineStringSerializer()
+    route_geometry = GeoJSONLineStringSerializer(required=False, allow_null=True)
     fuel_stops = FuelStopResponseSerializer(many=True)
     total_fuel_purchased = serializers.RegexField(r"^\d+\.\d{3}$")
     total_fuel_cost = serializers.RegexField(r"^\d+\.\d{2}$")

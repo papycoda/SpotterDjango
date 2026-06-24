@@ -23,6 +23,9 @@ GALLON_QUANTUM = Decimal("0.001")
 MONEY_QUANTUM = Decimal("0.01")
 VEHICLE_RANGE_METERS = float(Decimal(VEHICLE_RANGE_MILES) * METERS_PER_MILE)
 
+# Minimum purchase threshold
+MIN_PURCHASE_GALLONS = Decimal("1.000")  # 3 decimal places to match GALLON_QUANTUM
+
 
 class RouteGapTooLargeError(Exception):
     """Raised when no sequence of stations can bridge the route."""
@@ -126,6 +129,7 @@ class FuelOptimizationService:
                 normalized_stations,
                 current_station,
                 destination,
+                current_fuel,
                 search_start_index
             )
 
@@ -137,16 +141,26 @@ class FuelOptimizationService:
                 target_station is not None
                 and Decimal(target_station.nearby_station.station.price_per_gallon) >= current_price
             )
-            
+
             if should_fill_tank:
                 purchase_amount = self._tank - current_fuel
             else:
                 purchase_amount = max(Decimal("0"), gallons_needed - current_fuel)
-                
+
             purchase_amount = min(purchase_amount, self._tank - current_fuel).quantize(
                 GALLON_QUANTUM,
                 rounding=ROUND_HALF_UP,
             )
+
+            # Enhancement: Round tiny purchases up to minimum practical amount
+            if purchase_amount > 0 and purchase_amount < MIN_PURCHASE_GALLONS:
+                purchase_amount = min(
+                    MIN_PURCHASE_GALLONS,
+                    self._tank - current_fuel
+                ).quantize(
+                    GALLON_QUANTUM,
+                    rounding=ROUND_HALF_UP,
+                )
 
             # Record purchase if we bought fuel
             if purchase_amount > 0:
@@ -245,11 +259,40 @@ class FuelOptimizationService:
             
         return reachable, end_index
 
+    def _purchase_meets_minimum(
+        self,
+        from_station: StationProgress,
+        to_station: StationProgress,
+        destination: Decimal,
+        current_fuel: Decimal,
+    ) -> bool:
+        """Check if stopping at to_station would require at least MIN_PURCHASE_GALLONS.
+
+        Calculates how much fuel would actually be purchased at to_station given
+        current_fuel, considering the next target (further station or destination).
+        """
+        # Fuel consumed getting to to_station
+        distance_to_station = to_station.miles - from_station.miles
+        fuel_consumed = distance_to_station / self._mpg
+
+        # Fuel remaining when arriving at to_station
+        fuel_at_arrival = current_fuel - fuel_consumed
+
+        # Calculate fuel needed to reach destination from to_station
+        distance_to_destination = destination - to_station.miles
+        fuel_needed_to_destination = distance_to_destination / self._mpg
+
+        # Actual purchase amount = what we need - what we have
+        purchase_amount = max(Decimal("0"), fuel_needed_to_destination - fuel_at_arrival)
+
+        return purchase_amount >= MIN_PURCHASE_GALLONS
+
     def _find_next_target(
         self,
         stations: List[StationProgress],
         current_station: StationProgress,
         destination: Decimal,
+        current_fuel: Decimal,
         start_index: int = 0,
     ) -> Tuple[Optional[StationProgress], int]:
         """Return the first cheaper reachable station, else the furthest node."""
@@ -264,13 +307,19 @@ class FuelOptimizationService:
         # First, look for first cheaper station in reach
         for candidate in reachable_stations:
             if Decimal(candidate.nearby_station.station.price_per_gallon) < current_price:
-                return candidate, search_end_index
+                if self._purchase_meets_minimum(current_station, candidate, destination, current_fuel):
+                    return candidate, search_end_index
 
-        # If no cheaper station, check if destination is reachable
+        # If no suitable cheaper station, check if destination is reachable
         if destination <= current_station.miles + self._range:
             return None, search_end_index
 
-        # Otherwise, go to furthest possible station
+        # Otherwise, go to furthest station that meets minimum purchase requirement
+        for candidate in reversed(reachable_stations):
+            if self._purchase_meets_minimum(current_station, candidate, destination, current_fuel):
+                return candidate, search_end_index
+
+        # If no station meets minimum purchase but we still need to stop
         if not reachable_stations:
             raise RouteGapTooLargeError(
                 destination - current_station.miles, "destination"

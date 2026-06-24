@@ -45,6 +45,8 @@ class RouteFuelPlanEndpointTests(APITestCase):
         )
 
     def test_returns_geojson_and_fixed_precision_decimal_strings(self):
+        """Test that include_geometry=true returns GeoJSON and fixed precision decimals."""
+        payload_with_geometry = {**self.payload, "include_geometry": True}
         station = FuelStation(
             id="station-1",
             name="Example Fuel",
@@ -84,7 +86,7 @@ class RouteFuelPlanEndpointTests(APITestCase):
                 fuel_plan=fuel_plan,
             ),
         ):
-            response = self.client.post(self.url, self.payload, format="json")
+            response = self.client.post(self.url, payload_with_geometry, format="json")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["route_geometry"]["type"], "LineString")
@@ -221,3 +223,146 @@ class RouteFuelPlanEndpointTests(APITestCase):
         self.assertEqual(endpoint_geocode.call_count, 2)
         get_route.assert_called_once()
         station_geocode.assert_not_called()
+
+    def test_fuel_plan_without_include_geometry_omits_route_geometry(self):
+        """Test that route_geometry is omitted when include_geometry is not set."""
+        fuel_plan = SimpleNamespace(
+            fuel_stops=[],
+            total_fuel_purchased=Decimal("0.000"),
+            total_cost_usd=Decimal("0.00"),
+            vehicle_assumptions={
+                "range_miles": 500,
+                "mpg": 10,
+                "tank_gallons": 50,
+            },
+        )
+        result = FuelPlanResult(route_plan=self.route_plan(), fuel_plan=fuel_plan)
+
+        with patch(
+            "api.views.FuelPlanService.create_plan",
+            return_value=result,
+        ):
+            response = self.client.post(self.url, self.payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        # route_geometry should not be in the response
+        self.assertNotIn("route_geometry", response.data)
+        # Other fields should still be present
+        self.assertIn("start", response.data)
+        self.assertIn("finish", response.data)
+        self.assertIn("fuel_stops", response.data)
+        self.assertIn("total_fuel_purchased", response.data)
+        self.assertIn("total_fuel_cost", response.data)
+        self.assertIn("vehicle_assumptions", response.data)
+
+    def test_fuel_plan_with_include_geometry_true_includes_route_geometry(self):
+        """Test that route_geometry is included when include_geometry=true."""
+        fuel_plan = SimpleNamespace(
+            fuel_stops=[],
+            total_fuel_purchased=Decimal("0.000"),
+            total_cost_usd=Decimal("0.00"),
+            vehicle_assumptions={
+                "range_miles": 500,
+                "mpg": 10,
+                "tank_gallons": 50,
+            },
+        )
+        result = FuelPlanResult(route_plan=self.route_plan(), fuel_plan=fuel_plan)
+
+        payload_with_geometry = {**self.payload, "include_geometry": True}
+        with patch(
+            "api.views.FuelPlanService.create_plan",
+            return_value=result,
+        ):
+            response = self.client.post(self.url, payload_with_geometry, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        # route_geometry should be in the response
+        self.assertIn("route_geometry", response.data)
+        # Should be a valid GeoJSON LineString
+        self.assertEqual(response.data["route_geometry"]["type"], "LineString")
+        self.assertEqual(
+            response.data["route_geometry"]["coordinates"][0],
+            [-96.797, 32.7767],
+        )
+        self.assertEqual(
+            response.data["route_geometry"]["coordinates"][1],
+            [-104.9903, 39.7392],
+        )
+        # Other fields should still be present
+        self.assertIn("start", response.data)
+        self.assertIn("finish", response.data)
+        self.assertIn("fuel_stops", response.data)
+
+    def test_fuel_plan_with_include_geometry_false_omits_route_geometry(self):
+        """Test that route_geometry is omitted when include_geometry=false."""
+        fuel_plan = SimpleNamespace(
+            fuel_stops=[],
+            total_fuel_purchased=Decimal("0.000"),
+            total_cost_usd=Decimal("0.00"),
+            vehicle_assumptions={
+                "range_miles": 500,
+                "mpg": 10,
+                "tank_gallons": 50,
+            },
+        )
+        result = FuelPlanResult(route_plan=self.route_plan(), fuel_plan=fuel_plan)
+
+        payload_without_geometry = {**self.payload, "include_geometry": False}
+        with patch(
+            "api.views.FuelPlanService.create_plan",
+            return_value=result,
+        ):
+            response = self.client.post(self.url, payload_without_geometry, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        # route_geometry should not be in the response
+        self.assertNotIn("route_geometry", response.data)
+
+
+class RoutePreviewEndpointTests(APITestCase):
+    """Tests for route preview endpoint geometry behavior."""
+
+    def setUp(self):
+        self.url = reverse("route-preview")
+        self.payload = {"start": "Dallas, TX", "finish": "Denver, CO"}
+
+    @patch("api.clients.nominatim_client.NominatimClient.geocode")
+    @patch("api.clients.osrm_client.OSRMClient.get_route")
+    @patch("api.services.route_geocoding_service.RouteGeocodingService._geocode_with_nominatim")
+    def test_route_preview_always_includes_geometry(
+        self, endpoint_geocode, get_route, station_geocode
+    ):
+        """Test that route preview always includes geometry regardless of request."""
+        endpoint_geocode.side_effect = [
+            SimpleNamespace(
+                latitude=Decimal("32.7767"),
+                longitude=Decimal("-96.7970"),
+                display_name="Dallas, TX, USA",
+            ),
+            SimpleNamespace(
+                latitude=Decimal("39.7392"),
+                longitude=Decimal("-104.9903"),
+                display_name="Denver, CO, USA",
+            ),
+        ]
+        get_route.return_value = RouteResult(
+            distance_meters=Decimal("160934.4"),
+            duration_seconds=Decimal("7200"),
+            geometry=[
+                (Decimal("32.7767"), Decimal("-96.7970")),
+                (Decimal("39.7392"), Decimal("-104.9903")),
+            ],
+        )
+
+        response = self.client.post(self.url, self.payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        # geometry should always be in route preview response
+        self.assertIn("geometry", response.data)
+        # Should be a valid GeoJSON LineString
+        self.assertEqual(response.data["geometry"]["type"], "LineString")
+        self.assertEqual(
+            response.data["geometry"]["coordinates"][0],
+            [-96.797, 32.7767],
+        )
